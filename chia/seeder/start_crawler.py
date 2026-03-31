@@ -4,20 +4,20 @@ import logging
 import pathlib
 import sys
 from multiprocessing import freeze_support
-from typing import Any, Optional
+from typing import Any
 
 from chia_rs import ConsensusConstants
 
-from chia.apis import ApiProtocolRegistry
+from chia.apis import StubMetadataRegistry
 from chia.consensus.constants import replace_str_to_bytes
 from chia.consensus.default_constants import DEFAULT_CONSTANTS
-from chia.rpc.crawler_rpc_api import CrawlerRpcApi
+from chia.protocols.outbound_message import NodeType
 from chia.seeder.crawler import Crawler
 from chia.seeder.crawler_api import CrawlerAPI
-from chia.server.outbound_message import NodeType
+from chia.seeder.crawler_rpc_api import CrawlerRpcApi
+from chia.seeder.crawler_service import CrawlerService
 from chia.server.signal_handlers import SignalHandlers
 from chia.server.start_service import RpcInfo, Service, async_run
-from chia.types.aliases import CrawlerService
 from chia.util.chia_logging import initialize_service_logging
 from chia.util.config import load_config, load_config_cli
 from chia.util.default_root import resolve_root_path
@@ -46,7 +46,7 @@ def create_full_node_crawler_service(
 
     network_id = service_config["selected_network"]
 
-    rpc_info: Optional[RpcInfo[CrawlerRpcApi]] = None
+    rpc_info: RpcInfo[CrawlerRpcApi] | None = None
     if crawler_config.get("start_rpc_server", True):
         rpc_info = (CrawlerRpcApi, crawler_config.get("rpc_port", 8561))
 
@@ -63,7 +63,7 @@ def create_full_node_crawler_service(
         network_id=network_id,
         rpc_info=rpc_info,
         connect_to_daemon=connect_to_daemon,
-        class_for_type=ApiProtocolRegistry,
+        stub_metadata_for_type=StubMetadataRegistry,
     )
 
 

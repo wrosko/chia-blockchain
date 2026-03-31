@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING
 
 import aiosqlite
 import pytest
@@ -23,8 +24,6 @@ if TYPE_CHECKING:
 
 class UniqueError(Exception):
     """Used to uniquely trigger the exception path out of the context managers."""
-
-    pass
 
 
 async def increment_counter(db_wrapper: DBWrapper2) -> None:
@@ -427,7 +426,7 @@ async def test_cancelled_reader_does_not_cancel_writer() -> None:
 
             with pytest.raises(UniqueError):
                 async with db_wrapper.reader() as _:
-                    raise UniqueError()
+                    raise UniqueError
 
             assert await query_value(connection=writer) == 1
 
@@ -496,7 +495,7 @@ async def test_foreign_key_pragma_rolls_back_on_foreign_key_error() -> None:
 @dataclass
 class RowFactoryCase:
     id: str
-    factory: Optional[type[aiosqlite.Row]]
+    factory: type[aiosqlite.Row] | None
     marks: Marks = ()
 
 

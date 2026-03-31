@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from chia_puzzles_py.programs import (
     P2_SINGLETON_OR_DELAYED_PUZHASH,
@@ -11,10 +10,9 @@ from chia_puzzles_py.programs import (
     POOL_WAITINGROOM_INNERPUZ,
     POOL_WAITINGROOM_INNERPUZ_HASH,
 )
-from chia_rs import G1Element
+from chia_rs import CoinSpend, G1Element
 from chia_rs.sized_bytes import bytes32
 from chia_rs.sized_ints import uint32, uint64
-from clvm.casts import int_to_bytes
 
 from chia.consensus.block_rewards import calculate_pool_reward
 from chia.consensus.coinbase import pool_parent_id
@@ -22,13 +20,15 @@ from chia.pools.pool_wallet_info import LEAVING_POOL, SELF_POOLING, PoolState
 from chia.types.blockchain_format.coin import Coin
 from chia.types.blockchain_format.program import Program
 from chia.types.blockchain_format.serialized_program import SerializedProgram
-from chia.types.coin_spend import CoinSpend, compute_additions
+from chia.types.coin_spend import make_spend
+from chia.util.casts import int_to_bytes
 from chia.wallet.puzzles.singleton_top_layer import (
     SINGLETON_LAUNCHER_HASH,
     SINGLETON_MOD,
     SINGLETON_MOD_HASH,
     puzzle_for_singleton,
 )
+from chia.wallet.util.compute_additions import compute_additions
 from chia.wallet.util.curry_and_treehash import calculate_hash_of_quoted_mod_hash, curry_and_treehash, shatree_atom
 
 log = logging.getLogger(__name__)
@@ -125,8 +125,8 @@ def get_delayed_puz_info_from_launcher_spend(coinsol: CoinSpend) -> tuple[uint64
     extra_data = Program.from_bytes(bytes(coinsol.solution)).rest().rest().first()
     # Extra data is (pool_state delayed_puz_info)
     # Delayed puz info is (seconds delayed_puzzle_hash)
-    seconds: Optional[uint64] = None
-    delayed_puzzle_hash: Optional[bytes32] = None
+    seconds: uint64 | None = None
+    delayed_puzzle_hash: bytes32 | None = None
     for key_value_pairs in extra_data.as_iter():
         key_value_pair = key_value_pairs.as_pair()
         if key_value_pair is None:
@@ -220,14 +220,14 @@ def create_travel_spend(
     else:
         raise ValueError
 
-    current_singleton: Optional[Coin] = get_most_recent_singleton_coin_from_coin_spend(last_coin_spend)
+    current_singleton: Coin | None = get_most_recent_singleton_coin_from_coin_spend(last_coin_spend)
     assert current_singleton is not None
 
     if current_singleton.parent_coin_info == launcher_coin.name():
         parent_info_list = Program.to([launcher_coin.parent_coin_info, launcher_coin.amount])
     else:
         p = Program.from_bytes(bytes(last_coin_spend.puzzle_reveal))
-        last_coin_spend_inner_puzzle: Optional[Program] = get_inner_puzzle_from_puzzle(p)
+        last_coin_spend_inner_puzzle: Program | None = get_inner_puzzle_from_puzzle(p)
         assert last_coin_spend_inner_puzzle is not None
         parent_info_list = Program.to(
             [
@@ -240,10 +240,10 @@ def create_travel_spend(
     full_puzzle: Program = create_full_puzzle(inner_puzzle, launcher_coin.name())
 
     return (
-        CoinSpend(
+        make_spend(
             current_singleton,
-            SerializedProgram.from_program(full_puzzle),
-            SerializedProgram.from_program(full_solution),
+            full_puzzle,
+            full_solution,
         ),
         inner_puzzle,
     )
@@ -271,14 +271,14 @@ def create_absorb_spend(
     else:
         raise ValueError
     # full sol = (parent_info, my_amount, inner_solution)
-    coin: Optional[Coin] = get_most_recent_singleton_coin_from_coin_spend(last_coin_spend)
+    coin: Coin | None = get_most_recent_singleton_coin_from_coin_spend(last_coin_spend)
     assert coin is not None
 
     if coin.parent_coin_info == launcher_coin.name():
         parent_info: Program = Program.to([launcher_coin.parent_coin_info, launcher_coin.amount])
     else:
         p = Program.from_bytes(bytes(last_coin_spend.puzzle_reveal))
-        last_coin_spend_inner_puzzle: Optional[Program] = get_inner_puzzle_from_puzzle(p)
+        last_coin_spend_inner_puzzle: Program | None = get_inner_puzzle_from_puzzle(p)
         assert last_coin_spend_inner_puzzle is not None
         parent_info = Program.to(
             [
@@ -287,22 +287,16 @@ def create_absorb_spend(
                 last_coin_spend.coin.amount,
             ]
         )
-    full_solution: SerializedProgram = SerializedProgram.from_program(
-        Program.to([parent_info, last_coin_spend.coin.amount, inner_sol])
-    )
-    full_puzzle: SerializedProgram = SerializedProgram.from_program(
-        create_full_puzzle(inner_puzzle, launcher_coin.name())
-    )
+    full_solution: SerializedProgram = SerializedProgram.to([parent_info, last_coin_spend.coin.amount, inner_sol])
+    full_puzzle: SerializedProgram = create_full_puzzle(inner_puzzle, launcher_coin.name()).to_serialized()
     assert coin.puzzle_hash == full_puzzle.get_tree_hash()
 
     reward_parent: bytes32 = pool_parent_id(height, genesis_challenge)
-    p2_singleton_puzzle: SerializedProgram = SerializedProgram.from_program(
-        create_p2_singleton_puzzle(SINGLETON_MOD_HASH, launcher_coin.name(), delay_time, delay_ph)
-    )
+    p2_singleton_puzzle = create_p2_singleton_puzzle(
+        SINGLETON_MOD_HASH, launcher_coin.name(), delay_time, delay_ph
+    ).to_serialized()
     reward_coin: Coin = Coin(reward_parent, p2_singleton_puzzle.get_tree_hash(), reward_amount)
-    p2_singleton_solution: SerializedProgram = SerializedProgram.from_program(
-        Program.to([inner_puzzle.get_tree_hash(), reward_coin.name()])
-    )
+    p2_singleton_solution = SerializedProgram.to([inner_puzzle.get_tree_hash(), reward_coin.name()])
     assert p2_singleton_puzzle.get_tree_hash() == reward_coin.puzzle_hash
     assert full_puzzle.get_tree_hash() == coin.puzzle_hash
     assert get_inner_puzzle_from_puzzle(Program.from_bytes(bytes(full_puzzle))) is not None
@@ -314,7 +308,7 @@ def create_absorb_spend(
     return coin_spends
 
 
-def get_most_recent_singleton_coin_from_coin_spend(coin_sol: CoinSpend) -> Optional[Coin]:
+def get_most_recent_singleton_coin_from_coin_spend(coin_sol: CoinSpend) -> Coin | None:
     additions: list[Coin] = compute_additions(coin_sol)
     for coin in additions:
         if coin.amount % 2 == 1:
@@ -374,7 +368,7 @@ def uncurry_pool_waitingroom_inner_puzzle(inner_puzzle: Program) -> tuple[Progra
     return target_puzzle_hash, relative_lock_height, owner_pubkey, p2_singleton_hash
 
 
-def get_inner_puzzle_from_puzzle(full_puzzle: Program) -> Optional[Program]:
+def get_inner_puzzle_from_puzzle(full_puzzle: Program) -> Program | None:
     p = Program.from_bytes(bytes(full_puzzle))
     r = p.uncurry()
     if r is None:
@@ -387,8 +381,8 @@ def get_inner_puzzle_from_puzzle(full_puzzle: Program) -> Optional[Program]:
     return inner_puzzle
 
 
-def pool_state_from_extra_data(extra_data: Program) -> Optional[PoolState]:
-    state_bytes: Optional[bytes] = None
+def pool_state_from_extra_data(extra_data: Program) -> PoolState | None:
+    state_bytes: bytes | None = None
     try:
         for key, value in extra_data.as_python():
             if key == b"p":
@@ -402,7 +396,7 @@ def pool_state_from_extra_data(extra_data: Program) -> Optional[PoolState]:
         return None
 
 
-def solution_to_pool_state(full_spend: CoinSpend) -> Optional[PoolState]:
+def solution_to_pool_state(full_spend: CoinSpend) -> PoolState | None:
     full_solution_ser: SerializedProgram = full_spend.solution
     full_solution: Program = Program.from_bytes(bytes(full_solution_ser))
 

@@ -3,10 +3,10 @@ from __future__ import annotations
 import contextlib
 import json
 import operator
-import unittest
+import unittest.mock
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
-from typing import TYPE_CHECKING, Any, ClassVar, Union, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from chia_rs.sized_bytes import bytes32
 from chia_rs.sized_ints import uint32, uint64
@@ -14,10 +14,8 @@ from chia_rs.sized_ints import uint32, uint64
 from chia._tests.environments.common import ServiceEnvironment
 from chia.cmds.cmd_helpers import NeedsTXConfig, NeedsWalletRPC, TransactionEndpoint, TransactionsOut, WalletClientInfo
 from chia.cmds.param_types import CliAmount, cli_amount_none
-from chia.rpc.full_node_rpc_client import FullNodeRpcClient
+from chia.full_node.full_node_rpc_client import FullNodeRpcClient
 from chia.rpc.rpc_server import RpcServer
-from chia.rpc.wallet_rpc_api import WalletRpcApi
-from chia.rpc.wallet_rpc_client import WalletRpcClient
 from chia.server.server import ChiaServer
 from chia.server.start_service import Service
 from chia.simulator.full_node_simulator import FullNodeSimulator
@@ -27,6 +25,9 @@ from chia.wallet.util.tx_config import DEFAULT_TX_CONFIG, TXConfig
 from chia.wallet.wallet import Wallet
 from chia.wallet.wallet_node import Balance, WalletNode
 from chia.wallet.wallet_node_api import WalletNodeAPI
+from chia.wallet.wallet_request_types import GetWalletBalance
+from chia.wallet.wallet_rpc_api import WalletRpcApi
+from chia.wallet.wallet_rpc_client import WalletRpcClient
 from chia.wallet.wallet_state_manager import WalletStateManager
 
 STANDARD_TX_ENDPOINT_ARGS: dict[str, Any] = TransactionEndpoint(
@@ -49,9 +50,9 @@ OPP_DICT = {"<": operator.lt, ">": operator.gt, "<=": operator.le, ">=": operato
 
 
 class BalanceCheckingError(Exception):
-    errors: dict[Union[int, str], list[str]]
+    errors: dict[int | str, list[str]]
 
-    def __init__(self, errors: dict[Union[int, str], list[str]]) -> None:
+    def __init__(self, errors: dict[int | str, list[str]]) -> None:
         self.errors = errors
 
     def __repr__(self) -> str:
@@ -68,10 +69,10 @@ class WalletState:
 
 @dataclass
 class WalletStateTransition:
-    pre_block_balance_updates: dict[Union[int, str], dict[str, int]] = field(default_factory=dict)
-    post_block_balance_updates: dict[Union[int, str], dict[str, int]] = field(default_factory=dict)
-    pre_block_additional_balance_info: dict[Union[int, str], dict[str, int]] = field(default_factory=dict)
-    post_block_additional_balance_info: dict[Union[int, str], dict[str, int]] = field(default_factory=dict)
+    pre_block_balance_updates: dict[int | str, dict[str, int]] = field(default_factory=dict)
+    post_block_balance_updates: dict[int | str, dict[str, int]] = field(default_factory=dict)
+    pre_block_additional_balance_info: dict[int | str, dict[str, int]] = field(default_factory=dict)
+    post_block_additional_balance_info: dict[int | str, dict[str, int]] = field(default_factory=dict)
 
 
 @dataclass
@@ -120,7 +121,7 @@ class WalletEnvironment:
     def xch_wallet(self) -> Wallet:
         return self.service._node.wallet_state_manager.main_wallet
 
-    def dealias_wallet_id(self, wallet_id_or_alias: Union[int, str]) -> uint32:
+    def dealias_wallet_id(self, wallet_id_or_alias: int | str) -> uint32:
         """
         This function turns something that is either a wallet id or a wallet alias into a wallet id.
         """
@@ -130,7 +131,7 @@ class WalletEnvironment:
             else uint32(self.wallet_aliases[wallet_id_or_alias])
         )
 
-    def alias_wallet_id(self, wallet_id: uint32) -> Union[uint32, str]:
+    def alias_wallet_id(self, wallet_id: uint32) -> uint32 | str:
         """
         This function turns a wallet id into an alias if one is available or the same wallet id if one is not.
         """
@@ -140,7 +141,7 @@ class WalletEnvironment:
         else:
             return wallet_id
 
-    async def check_balances(self, additional_balance_info: dict[Union[int, str], dict[str, int]] = {}) -> None:
+    async def check_balances(self, additional_balance_info: dict[int | str, dict[str, int]] = {}) -> None:
         """
         This function checks the internal representation of what the balances should be against the balances that the
         wallet actually returns via the RPC.
@@ -150,7 +151,7 @@ class WalletEnvironment:
         dealiased_additional_balance_info: dict[uint32, dict[str, int]] = {
             self.dealias_wallet_id(k): v for k, v in additional_balance_info.items()
         }
-        errors: dict[Union[int, str], list[str]] = {}
+        errors: dict[int | str, list[str]] = {}
         for wallet_id in self.wallet_state_manager.wallets:
             if wallet_id not in self.wallet_states:
                 raise KeyError(f"No wallet state for wallet id {wallet_id} (alias: {self.alias_wallet_id(wallet_id)})")
@@ -169,7 +170,9 @@ class WalletEnvironment:
                     else {}
                 ),
             }
-            balance_response: dict[str, int] = await self.rpc_client.get_wallet_balance(wallet_id)
+            balance_response: dict[str, int] = (
+                await self.rpc_client.get_wallet_balance(GetWalletBalance(wallet_id=wallet_id))
+            ).wallet_balance.to_json_dict()
 
             if not expected_result.items() <= balance_response.items():
                 for key, value in expected_result.items():
@@ -186,7 +189,7 @@ class WalletEnvironment:
         if errors != {}:
             raise BalanceCheckingError(errors)
 
-    async def change_balances(self, update_dictionary: dict[Union[int, str], dict[str, int]]) -> None:
+    async def change_balances(self, update_dictionary: dict[int | str, dict[str, int]]) -> None:
         """
         This method changes the internal representation of what the wallet balances should be. This is probably
         necessary to call before check_balances as most wallet operations will result in a balance change that causes
@@ -225,7 +228,7 @@ class WalletEnvironment:
                 )
             else:
                 for key, change in kwargs.items():
-                    if key in "set_remainder":
+                    if key in {"set_remainder", "init"}:
                         continue
                     if "#" in key:
                         opp: str = key[0 : key.index("#")]
@@ -344,7 +347,7 @@ class WalletTestFramework:
         1) Ensures all pending transactions have entered the mempool
         2) Checks that all balances have changed properly prior to a block being farmed
         3) Farms a block (to no one in particular)
-        4) Chacks that all balances have changed properly after the block was farmed
+        4) Checks that all balances have changed properly after the block was farmed
         5) Checks that all pending transactions that were gathered in step 1 are now confirmed
         6) Checks that if `reuse_puzhash` was set, no new derivations were created
         7) Ensures the wallet is in a synced state before progressing to the rest of the test
@@ -355,7 +358,7 @@ class WalletTestFramework:
             for env in self.environments:
                 ph_indexes: dict[uint32, int] = {}
                 for wallet_id in env.wallet_state_manager.wallets:
-                    ph_indexes[wallet_id] = await env.wallet_state_manager.puzzle_store.get_unused_count(wallet_id)
+                    ph_indexes[wallet_id] = await env.wallet_state_manager.puzzle_store.get_used_count(wallet_id)
                 puzzle_hash_indexes.append(ph_indexes)
 
         pending_txs: list[list[LightTransactionRecord]] = []
@@ -426,5 +429,5 @@ class WalletTestFramework:
             for env, ph_indexes_before in zip(self.environments, puzzle_hash_indexes):
                 for wallet_id, ph_index in zip(env.wallet_state_manager.wallets, ph_indexes_before):
                     assert ph_indexes_before[wallet_id] == (
-                        await env.wallet_state_manager.puzzle_store.get_unused_count(wallet_id)
+                        await env.wallet_state_manager.puzzle_store.get_used_count(wallet_id)
                     )

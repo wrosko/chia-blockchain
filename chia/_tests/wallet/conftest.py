@@ -2,40 +2,39 @@ from __future__ import annotations
 
 import contextlib
 import unittest
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack
 from dataclasses import replace
-from typing import Any, Callable, Literal, Optional
+from typing import Any
 
 import pytest
 from chia_rs import (
     DONT_VALIDATE_SIGNATURE,
     ConsensusConstants,
+    FullBlock,
     SpendBundleConditions,
     get_flags_for_height_and_constants,
     run_block_generator,
     run_block_generator2,
 )
-from chia_rs.sized_bytes import bytes32
 from chia_rs.sized_ints import uint32, uint64, uint128
 
 from chia._tests.environments.wallet import NewPuzzleHashError, WalletEnvironment, WalletState, WalletTestFramework
 from chia._tests.util.setup_nodes import setup_simulators_and_wallets_service
 from chia._tests.wallet.wallet_block_tools import WalletBlockTools
 from chia.full_node.full_node import FullNode
-from chia.rpc.full_node_rpc_client import FullNodeRpcClient
-from chia.rpc.wallet_rpc_client import WalletRpcClient
-from chia.types.full_block import FullBlock
+from chia.full_node.full_node_rpc_client import FullNodeRpcClient
 from chia.types.peer_info import PeerInfo
 from chia.wallet.util.tx_config import DEFAULT_TX_CONFIG, TXConfig
 from chia.wallet.wallet_node import Balance
+from chia.wallet.wallet_rpc_client import WalletRpcClient
 from chia.wallet.wallet_state_manager import WalletStateManager
 
 
 @pytest.fixture(scope="function", autouse=True)
 def block_is_current_at(monkeypatch: pytest.MonkeyPatch) -> None:
     def make_new_synced(func: Callable[..., Awaitable[bool]]) -> Any:
-        async def mocked_synced(self: Any, block_is_current_at: Optional[uint64] = uint64(0)) -> bool:
+        async def mocked_synced(self: Any, block_is_current_at: uint64 | None = uint64(0)) -> bool:
             return await func(self, block_is_current_at)
 
         return mocked_synced
@@ -65,7 +64,7 @@ async def ignore_block_validation(
     if "standard_block_tools" in request.keywords:
         return None
 
-    async def validate_block_body(*args: Any, **kwargs: Any) -> Literal[None]:
+    async def validate_block_body(*args: Any, **kwargs: Any) -> None:
         return None
 
     def create_wrapper(original_create: Any) -> Any:
@@ -84,11 +83,11 @@ async def ignore_block_validation(
         return new_create
 
     def run_block(
-        block: FullBlock, prev_generators: list[bytes], constants: ConsensusConstants
-    ) -> tuple[Optional[int], Optional[SpendBundleConditions]]:
+        block: FullBlock, prev_generators: list[bytes], prev_tx_height: uint32, constants: ConsensusConstants
+    ) -> tuple[int | None, SpendBundleConditions | None]:
         assert block.transactions_generator is not None
         assert block.transactions_info is not None
-        flags = get_flags_for_height_and_constants(block.height, constants) | DONT_VALIDATE_SIGNATURE
+        flags = get_flags_for_height_and_constants(prev_tx_height, constants) | DONT_VALIDATE_SIGNATURE
         if block.height >= constants.HARD_FORK_HEIGHT:
             run_block = run_block_generator2
         else:
@@ -121,10 +120,10 @@ async def ignore_block_validation(
         "chia.consensus.multiprocess_validation.validate_finished_header_block", lambda *_, **__: (uint64(1), None)
     )
     monkeypatch.setattr(
-        "chia.consensus.multiprocess_validation.verify_and_get_quality_string", lambda *_, **__: bytes32.zeros
+        "chia.consensus.multiprocess_validation.validate_pospace_and_get_required_iters", lambda *_, **__: uint64(0)
     )
-    monkeypatch.setattr("chia.consensus.block_record.BlockRecord.sp_total_iters", lambda *_: uint128(0))
-    monkeypatch.setattr("chia.consensus.block_record.BlockRecord.ip_sub_slot_total_iters", lambda *_: uint128(0))
+    monkeypatch.setattr("chia_rs.BlockRecord.sp_total_iters", lambda *_: uint128(0))
+    monkeypatch.setattr("chia_rs.BlockRecord.ip_sub_slot_total_iters", lambda *_: uint128(0))
     monkeypatch.setattr("chia.consensus.make_sub_epoch_summary.calculate_sp_iters", lambda *_: uint64(0))
     monkeypatch.setattr("chia.consensus.make_sub_epoch_summary.calculate_ip_iters", lambda *_: uint64(0))
     monkeypatch.setattr("chia.consensus.difficulty_adjustment._get_next_sub_slot_iters", lambda *_: uint64(1))
@@ -132,7 +131,7 @@ async def ignore_block_validation(
     monkeypatch.setattr("chia.full_node.full_node_store.calculate_sp_interval_iters", lambda *_: uint64(1))
     monkeypatch.setattr("chia.consensus.pot_iterations.calculate_sp_interval_iters", lambda *_: uint64(1))
     monkeypatch.setattr("chia.consensus.pot_iterations.calculate_ip_iters", lambda *_: uint64(1))
-    monkeypatch.setattr("chia.consensus.block_record.BlockRecord.sp_sub_slot_total_iters", lambda *_: uint64(1))
+    monkeypatch.setattr("chia_rs.BlockRecord.sp_sub_slot_total_iters", lambda *_: uint64(1))
 
 
 @pytest.fixture(scope="function", params=[True, False])
@@ -152,7 +151,7 @@ def new_action_scope_wrapper(func: Any) -> Any:
         # Take note of the number of puzzle hashes if we're supposed to be reusing
         ph_indexes: dict[uint32, int] = {}
         for wallet_id in self.wallets:
-            ph_indexes[wallet_id] = await self.puzzle_store.get_unused_count(wallet_id)
+            ph_indexes[wallet_id] = await self.puzzle_store.get_used_count(wallet_id)
 
         async with func(self, *args, **kwargs) as action_scope:
             yield action_scope
@@ -160,7 +159,7 @@ def new_action_scope_wrapper(func: Any) -> Any:
         # Finally, check that the number of puzzle hashes did or did not increase by the specified amount
         if action_scope.config.tx_config.reuse_puzhash:
             for wallet_id, ph_index in zip(self.wallets, ph_indexes):
-                if not ph_indexes[wallet_id] == (await self.puzzle_store.get_unused_count(wallet_id)):
+                if not ph_indexes[wallet_id] == (await self.puzzle_store.get_used_count(wallet_id)):
                     raise NewPuzzleHashError(
                         f"wallet ID {wallet_id} generated new puzzle hashes while reuse_puzhash was False"
                     )

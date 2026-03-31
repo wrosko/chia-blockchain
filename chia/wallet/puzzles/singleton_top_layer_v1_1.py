@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import Optional
 
 from chia_puzzles_py.programs import (
     P2_SINGLETON,
@@ -15,12 +14,13 @@ from chia_puzzles_py.programs import (
 from chia_puzzles_py.programs import (
     SINGLETON_LAUNCHER_HASH as SINGLETON_LAUNCHER_HASH_BYTES,
 )
+from chia_rs import CoinSpend
 from chia_rs.sized_bytes import bytes32
 from chia_rs.sized_ints import uint64
 
 from chia.types.blockchain_format.coin import Coin
 from chia.types.blockchain_format.program import Program
-from chia.types.coin_spend import CoinSpend, make_spend
+from chia.types.coin_spend import make_spend
 from chia.types.condition_opcodes import ConditionOpcode
 from chia.util.hash import std_hash
 from chia.wallet.lineage_proof import LineageProof
@@ -237,7 +237,7 @@ def launch_conditions_and_coinsol(
 def lineage_proof_for_coinsol(coin_spend: CoinSpend) -> LineageProof:
     parent_name: bytes32 = coin_spend.coin.parent_coin_info
 
-    inner_puzzle_hash: Optional[bytes32] = None
+    inner_puzzle_hash: bytes32 | None = None
     if coin_spend.coin.puzzle_hash != SINGLETON_LAUNCHER_HASH:
         full_puzzle = Program.from_bytes(bytes(coin_spend.puzzle_reveal))
         r = full_puzzle.uncurry()
@@ -320,8 +320,8 @@ def claim_p2_singleton(
     p2_singleton_coin: Coin,
     singleton_inner_puzhash: bytes32,
     launcher_id: bytes32,
-    delay_time: Optional[uint64] = None,
-    delay_ph: Optional[bytes32] = None,
+    delay_time: uint64 | None = None,
+    delay_ph: bytes32 | None = None,
 ) -> tuple[Program, Program, CoinSpend]:
     assertion = Program.to([ConditionOpcode.ASSERT_COIN_ANNOUNCEMENT, std_hash(p2_singleton_coin.name() + b"$")])
     announcement = Program.to([ConditionOpcode.CREATE_PUZZLE_ANNOUNCEMENT, p2_singleton_coin.name()])

@@ -3,11 +3,12 @@ from __future__ import annotations
 import logging
 
 import pytest
+from chia_rs import SpendBundle
 from chia_rs.sized_bytes import bytes32
 from chia_rs.sized_ints import uint32, uint64
-from clvm.casts import int_to_bytes
 
 from chia._tests.blockchain.blockchain_test_utils import _validate_and_add_block
+from chia._tests.connection_utils import add_dummy_connection
 from chia._tests.util.generator_tools_testing import run_and_get_removals_and_additions
 from chia.consensus.blockchain import AddBlockResult
 from chia.full_node.full_node_api import FullNodeAPI
@@ -18,9 +19,10 @@ from chia.simulator.block_tools import BlockTools, test_constants
 from chia.simulator.wallet_tools import WalletTool
 from chia.types.condition_opcodes import ConditionOpcode
 from chia.types.condition_with_args import ConditionWithArgs
-from chia.types.spend_bundle import SpendBundle, estimate_fees
+from chia.util.casts import int_to_bytes
 from chia.util.errors import Err
 from chia.wallet.conditions import AssertCoinAnnouncement, AssertPuzzleAnnouncement
+from chia.wallet.estimate_fees import estimate_fees
 
 BURN_PUZZLE_HASH = bytes32(b"0" * 32)
 
@@ -33,7 +35,7 @@ log = logging.getLogger(__name__)
 class TestBlockchainTransactions:
     @pytest.mark.anyio
     async def test_basic_blockchain_tx(
-        self, two_nodes: tuple[FullNodeAPI, FullNodeAPI, ChiaServer, ChiaServer, BlockTools]
+        self, two_nodes: tuple[FullNodeAPI, FullNodeAPI, ChiaServer, ChiaServer, BlockTools], self_hostname: str
     ) -> None:
         num_blocks = 10
         wallet_a = WALLET_A
@@ -59,13 +61,15 @@ class TestBlockchainTransactions:
         assert spend_bundle is not None
         tx: wallet_protocol.SendTransaction = wallet_protocol.SendTransaction(spend_bundle)
 
-        await full_node_api_1.send_transaction(tx)
+        _, dummy_node_id = await add_dummy_connection(full_node_api_1.server, self_hostname, 12312)
+        dummy_peer = full_node_api_1.server.all_connections[dummy_node_id]
+        await full_node_api_1.send_transaction(tx, dummy_peer)
 
         sb = full_node_1.mempool_manager.get_spendbundle(spend_bundle.name())
         assert sb == spend_bundle
 
         last_block = blocks[-1]
-        result = await full_node_1.mempool_manager.create_bundle_from_mempool(last_block.header_hash)
+        result = full_node_1.mempool_manager.create_bundle_from_mempool(last_block.header_hash)
         assert result is not None
         next_spendbundle, _ = result
 
@@ -875,14 +879,12 @@ class TestBlockchainTransactions:
 
         # we compare the timestamp against the previous transaction block, so in
         # order to progress the timestamp, we need to farm one more block
-        blocks.extend(
-            bt.get_consecutive_blocks(
-                1,
-                blocks,
-                farmer_reward_puzzle_hash=coinbase_puzzlehash,
-                guarantee_transaction_block=True,
-                time_per_block=301,
-            )
+        blocks = bt.get_consecutive_blocks(
+            1,
+            blocks,
+            farmer_reward_puzzle_hash=coinbase_puzzlehash,
+            guarantee_transaction_block=True,
+            time_per_block=301,
         )
         await _validate_and_add_block(full_node_1.blockchain, blocks[-1])
 
@@ -948,14 +950,12 @@ class TestBlockchainTransactions:
 
         # we compare the timestamp against the previous transaction block, so in
         # order to progress the timestamp, we need to farm one more block
-        blocks.extend(
-            bt.get_consecutive_blocks(
-                1,
-                blocks,
-                farmer_reward_puzzle_hash=coinbase_puzzlehash,
-                guarantee_transaction_block=True,
-                time_per_block=30,
-            )
+        blocks = bt.get_consecutive_blocks(
+            1,
+            blocks,
+            farmer_reward_puzzle_hash=coinbase_puzzlehash,
+            guarantee_transaction_block=True,
+            time_per_block=30,
         )
         await _validate_and_add_block(full_node_1.blockchain, blocks[-1])
 

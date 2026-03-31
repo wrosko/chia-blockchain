@@ -12,9 +12,9 @@ import os
 import random
 import sysconfig
 import tempfile
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import AsyncExitStack
-from typing import Any, Callable, Union
+from typing import Any
 
 import aiohttp
 import pytest
@@ -28,7 +28,6 @@ from pytest import MonkeyPatch
 from chia._tests import ether
 from chia._tests.core.data_layer.util import ChiaRoot
 from chia._tests.core.node_height import node_height_at_least
-from chia._tests.simulation.test_simulation import test_constants_modified
 from chia._tests.util.misc import (
     BenchmarkRunner,
     ComparableEnum,
@@ -49,13 +48,15 @@ from chia._tests.util.setup_nodes import (
 )
 from chia._tests.util.spend_sim import CostLogger
 from chia._tests.util.time_out_assert import time_out_assert
+from chia.farmer.farmer_rpc_client import FarmerRpcClient
+from chia.farmer.farmer_service import FarmerService
 from chia.full_node.full_node_api import FullNodeAPI
-from chia.rpc.farmer_rpc_client import FarmerRpcClient
-from chia.rpc.harvester_rpc_client import HarvesterRpcClient
-from chia.rpc.wallet_rpc_client import WalletRpcClient
+from chia.full_node.full_node_service import FullNodeService
+from chia.harvester.harvester_rpc_client import HarvesterRpcClient
+from chia.harvester.harvester_service import HarvesterService
+from chia.seeder.crawler_service import CrawlerService
 from chia.seeder.dns_server import DNSServer
 from chia.server.server import ChiaServer
-from chia.server.start_service import Service
 from chia.simulator.full_node_simulator import FullNodeSimulator
 from chia.simulator.setup_services import (
     setup_crawler,
@@ -63,28 +64,25 @@ from chia.simulator.setup_services import (
     setup_full_node,
     setup_introducer,
     setup_seeder,
+    setup_solver,
     setup_timelord,
 )
 from chia.simulator.start_simulator import SimulatorFullNodeService
 from chia.simulator.wallet_tools import WalletTool
-
-# Set spawn after stdlib imports, but before other imports
-from chia.types.aliases import (
-    CrawlerService,
-    FarmerService,
-    FullNodeService,
-    HarvesterService,
-    TimelordService,
-    WalletService,
-)
-from chia.types.peer_info import PeerInfo
+from chia.solver.solver_service import SolverService
+from chia.timelord.timelord_service import TimelordService
+from chia.types.peer_info import PeerInfo, UnresolvedPeerInfo
 from chia.util.config import create_default_chia_config, lock_and_load_config
 from chia.util.db_wrapper import generate_in_memory_db_uri
 from chia.util.keychain import Keychain
 from chia.util.task_timing import main as task_instrumentation_main
 from chia.util.task_timing import start_task_instrumentation, stop_task_instrumentation
 from chia.wallet.wallet_node import WalletNode
+from chia.wallet.wallet_rpc_client import WalletRpcClient
+from chia.wallet.wallet_service import WalletService
 
+# TODO: review how this is now after other imports and before some stdlib imports...  :[
+# Set spawn after stdlib imports, but before other imports
 multiprocessing.set_start_method("spawn")
 
 from dataclasses import replace
@@ -93,13 +91,27 @@ from pathlib import Path
 from chia_rs.sized_ints import uint128
 
 from chia._tests.environments.wallet import WalletEnvironment, WalletState, WalletTestFramework
-from chia._tests.util.setup_nodes import setup_farmer_multi_harvester
-from chia.rpc.full_node_rpc_client import FullNodeRpcClient
+from chia._tests.util.setup_nodes import setup_farmer_solver_multi_harvester
+from chia.full_node.full_node_rpc_client import FullNodeRpcClient
 from chia.simulator.block_tools import BlockTools, create_block_tools_async, test_constants
 from chia.simulator.keyring import TempKeyring
 from chia.util.keyring_wrapper import KeyringWrapper
 from chia.wallet.util.tx_config import DEFAULT_TX_CONFIG, TXConfig
 from chia.wallet.wallet_node import Balance
+
+test_constants_modified = test_constants.replace(
+    DIFFICULTY_STARTING=uint64(2**8),
+    DISCRIMINANT_SIZE_BITS=uint16(1024),
+    SUB_EPOCH_BLOCKS=uint32(140),
+    WEIGHT_PROOF_THRESHOLD=uint8(2),
+    WEIGHT_PROOF_RECENT_BLOCKS=uint32(350),
+    MAX_SUB_SLOT_BLOCKS=uint32(50),
+    NUM_SPS_SUB_SLOT=uint8(32),  # Must be a power of 2
+    EPOCH_BLOCKS=uint32(280),
+    SUB_SLOT_ITERS_STARTING=uint64(2**20),
+    NUMBER_ZERO_BITS_PLOT_FILTER_V1=uint8(5),
+    NUMBER_ZERO_BITS_PLOT_FILTER_V2=uint8(7),
+)
 
 
 @pytest.fixture(name="ether_setup", autouse=True)
@@ -195,13 +207,26 @@ def get_keychain():
 
 class ConsensusMode(ComparableEnum):
     PLAIN = 0
+    # the hard fork introduced in Chia 2.0 (but really in 2.1)
     HARD_FORK_2_0 = 1
-    SOFT_FORK_6 = 2
+    # the soft fork introduced in Chia 2.7
+    SOFT_FORK_2_7 = 2
+    # the hard fork introduced in Chia 3.0
+    HARD_FORK_3_0 = 3
+    # the hard fork introduced in Chia 3.0 but after v1 plots have been
+    # phased-out, and no longer valid
+    HARD_FORK_3_0_AFTER_PHASE_OUT = 4
 
 
 @pytest.fixture(
     scope="session",
-    params=[ConsensusMode.PLAIN, ConsensusMode.HARD_FORK_2_0, ConsensusMode.SOFT_FORK_6],
+    params=[
+        ConsensusMode.PLAIN,
+        ConsensusMode.HARD_FORK_2_0,
+        ConsensusMode.SOFT_FORK_2_7,
+        ConsensusMode.HARD_FORK_3_0,
+        ConsensusMode.HARD_FORK_3_0_AFTER_PHASE_OUT,
+    ],
 )
 def consensus_mode(request):
     return request.param
@@ -210,25 +235,58 @@ def consensus_mode(request):
 @pytest.fixture(scope="session")
 def blockchain_constants(consensus_mode: ConsensusMode) -> ConsensusConstants:
     ret: ConsensusConstants = test_constants
+
     if consensus_mode >= ConsensusMode.HARD_FORK_2_0:
         ret = ret.replace(
             HARD_FORK_HEIGHT=uint32(2),
+        )
+
+    if consensus_mode >= ConsensusMode.SOFT_FORK_2_7:
+        ret = ret.replace(
+            HARD_FORK_HEIGHT=uint32(0),
+            SOFT_FORK8_HEIGHT=uint32(0),
+            SOFT_FORK9_HEIGHT=uint32(0),
+        )
+
+    if consensus_mode >= ConsensusMode.HARD_FORK_3_0_AFTER_PHASE_OUT:
+        ret = ret.replace(
+            HARD_FORK2_HEIGHT=uint32(0),
+            PLOT_V1_PHASE_OUT_EPOCH_BITS=uint8(0),
+            # we don't have very much v2 space, and no phase-out means the
+            # difficulty won't adjust gradually. We need a lower difficulty
+            # level to start with
+            DIFFICULTY_STARTING=uint64(2),
+        )
+    elif consensus_mode >= ConsensusMode.HARD_FORK_3_0:
+        ret = ret.replace(
+            # TODO: todo_v2_plots we may want to tweak these test cases to
+            # activate the hard fork at some height > 0 (e.g. 5)
+            # and have a shorter phase-out period (e.g. 2 bits). We would have
+            # to regenerate the test chains and tweak some tests for this
+            HARD_FORK2_HEIGHT=uint32(0),
+            # we don't have very much v2 space. We need a lower difficulty
+            # level to start with
+            DIFFICULTY_STARTING=uint64(7),
+        )
+    elif consensus_mode >= ConsensusMode.HARD_FORK_2_0:
+        ret = ret.replace(
             PLOT_FILTER_128_HEIGHT=uint32(10),
             PLOT_FILTER_64_HEIGHT=uint32(15),
             PLOT_FILTER_32_HEIGHT=uint32(20),
         )
-    if consensus_mode >= ConsensusMode.SOFT_FORK_6:
-        ret = ret.replace(
-            SOFT_FORK6_HEIGHT=uint32(2),
-        )
+
     return ret
 
 
 @pytest.fixture(scope="session", name="bt")
-async def block_tools_fixture(get_keychain, blockchain_constants, anyio_backend) -> BlockTools:
+async def block_tools_fixture(
+    get_keychain, blockchain_constants, anyio_backend, testrun_uid: str
+) -> AsyncIterator[BlockTools]:
     # Note that this causes a lot of CPU and disk traffic - disk, DB, ports, process creation ...
-    _shared_block_tools = await create_block_tools_async(constants=blockchain_constants, keychain=get_keychain)
-    return _shared_block_tools
+    async with create_block_tools_async(
+        constants=blockchain_constants, keychain=get_keychain, testrun_uid=testrun_uid
+    ) as shared_block_tools:
+        yield shared_block_tools
 
 
 # if you have a system that has an unusual hostname for localhost and you want
@@ -276,42 +334,46 @@ def softfork_height(request) -> int:
     return request.param
 
 
-saved_blocks_version = "2.0"
+def test_chain_suffix(consensus_mode: ConsensusMode) -> str:
+    if consensus_mode >= ConsensusMode.HARD_FORK_3_0_AFTER_PHASE_OUT:
+        return "3.0"
+    elif consensus_mode >= ConsensusMode.HARD_FORK_3_0:
+        return "3.0_mixed"
+    elif consensus_mode >= ConsensusMode.SOFT_FORK_2_7:
+        return "2.7"
+    elif consensus_mode >= ConsensusMode.HARD_FORK_2_0:
+        return "2.0_hardfork"
+    else:
+        return "2.0"
 
 
 @pytest.fixture(scope="session")
 def default_400_blocks(bt, consensus_mode):
-    version = ""
-    if consensus_mode >= ConsensusMode.HARD_FORK_2_0:
-        version = "_hardfork"
+    version = test_chain_suffix(consensus_mode)
 
     from chia._tests.util.blockchain import persistent_blocks
 
-    return persistent_blocks(400, f"test_blocks_400_{saved_blocks_version}{version}.db", bt, seed=b"400")
+    return persistent_blocks(400, f"test_blocks_400_{version}.db", bt, seed=b"400")
 
 
 @pytest.fixture(scope="session")
 def default_1000_blocks(bt, consensus_mode):
-    version = ""
-    if consensus_mode >= ConsensusMode.HARD_FORK_2_0:
-        version = "_hardfork"
+    version = test_chain_suffix(consensus_mode)
 
     from chia._tests.util.blockchain import persistent_blocks
 
-    return persistent_blocks(1000, f"test_blocks_1000_{saved_blocks_version}{version}.db", bt, seed=b"1000")
+    return persistent_blocks(1000, f"test_blocks_1000_{version}.db", bt, seed=b"1000")
 
 
 @pytest.fixture(scope="session")
 def pre_genesis_empty_slots_1000_blocks(bt, consensus_mode):
-    version = ""
-    if consensus_mode >= ConsensusMode.HARD_FORK_2_0:
-        version = "_hardfork"
+    version = test_chain_suffix(consensus_mode)
 
     from chia._tests.util.blockchain import persistent_blocks
 
     return persistent_blocks(
         1000,
-        f"pre_genesis_empty_slots_1000_blocks{saved_blocks_version}{version}.db",
+        f"pre_genesis_empty_slots_1000_blocks{version}.db",
         bt,
         seed=b"empty_slots",
         empty_sub_slots=1,
@@ -320,26 +382,22 @@ def pre_genesis_empty_slots_1000_blocks(bt, consensus_mode):
 
 @pytest.fixture(scope="session")
 def default_1500_blocks(bt, consensus_mode):
-    version = ""
-    if consensus_mode >= ConsensusMode.HARD_FORK_2_0:
-        version = "_hardfork"
+    version = test_chain_suffix(consensus_mode)
 
     from chia._tests.util.blockchain import persistent_blocks
 
-    return persistent_blocks(1500, f"test_blocks_1500_{saved_blocks_version}{version}.db", bt, seed=b"1500")
+    return persistent_blocks(1500, f"test_blocks_1500_{version}.db", bt, seed=b"1500")
 
 
 @pytest.fixture(scope="session")
 def default_10000_blocks(bt, consensus_mode):
     from chia._tests.util.blockchain import persistent_blocks
 
-    version = ""
-    if consensus_mode >= ConsensusMode.HARD_FORK_2_0:
-        version = "_hardfork"
+    version = test_chain_suffix(consensus_mode)
 
     return persistent_blocks(
         10000,
-        f"test_blocks_10000_{saved_blocks_version}{version}.db",
+        f"test_blocks_10000_{version}.db",
         bt,
         seed=b"10000",
         dummy_block_references=True,
@@ -350,15 +408,13 @@ def default_10000_blocks(bt, consensus_mode):
 # and has heavier weight blocks
 @pytest.fixture(scope="session")
 def test_long_reorg_blocks(bt, consensus_mode, default_10000_blocks):
-    version = ""
-    if consensus_mode >= ConsensusMode.HARD_FORK_2_0:
-        version = "_hardfork"
+    version = test_chain_suffix(consensus_mode)
 
     from chia._tests.util.blockchain import persistent_blocks
 
     return persistent_blocks(
         4500,
-        f"test_blocks_long_reorg_{saved_blocks_version}{version}.db",
+        f"test_blocks_long_reorg_{version}.db",
         bt,
         block_list_input=default_10000_blocks[:500],
         seed=b"reorg_blocks",
@@ -370,15 +426,13 @@ def test_long_reorg_blocks(bt, consensus_mode, default_10000_blocks):
 
 @pytest.fixture(scope="session")
 def test_long_reorg_1500_blocks(bt, consensus_mode, default_10000_blocks):
-    version = ""
-    if consensus_mode >= ConsensusMode.HARD_FORK_2_0:
-        version = "_hardfork"
+    version = test_chain_suffix(consensus_mode)
 
     from chia._tests.util.blockchain import persistent_blocks
 
     return persistent_blocks(
         4500,
-        f"test_blocks_long_reorg_{saved_blocks_version}{version}-2.db",
+        f"test_blocks_long_reorg_{version}-2.db",
         bt,
         block_list_input=default_10000_blocks[:1500],
         seed=b"reorg_blocks",
@@ -392,15 +446,13 @@ def test_long_reorg_1500_blocks(bt, consensus_mode, default_10000_blocks):
 # and has the same weight blocks
 @pytest.fixture(scope="session")
 def test_long_reorg_blocks_light(bt, consensus_mode, default_10000_blocks):
-    version = ""
-    if consensus_mode >= ConsensusMode.HARD_FORK_2_0:
-        version = "_hardfork"
+    version = test_chain_suffix(consensus_mode)
 
     from chia._tests.util.blockchain import persistent_blocks
 
     return persistent_blocks(
         4500,
-        f"test_blocks_long_reorg_light_{saved_blocks_version}{version}.db",
+        f"test_blocks_long_reorg_light_{version}.db",
         bt,
         block_list_input=default_10000_blocks[:500],
         seed=b"reorg_blocks2",
@@ -411,15 +463,13 @@ def test_long_reorg_blocks_light(bt, consensus_mode, default_10000_blocks):
 
 @pytest.fixture(scope="session")
 def test_long_reorg_1500_blocks_light(bt, consensus_mode, default_10000_blocks):
-    version = ""
-    if consensus_mode >= ConsensusMode.HARD_FORK_2_0:
-        version = "_hardfork"
+    version = test_chain_suffix(consensus_mode)
 
     from chia._tests.util.blockchain import persistent_blocks
 
     return persistent_blocks(
         4500,
-        f"test_blocks_long_reorg_light_{saved_blocks_version}{version}-2.db",
+        f"test_blocks_long_reorg_light_{version}-2.db",
         bt,
         block_list_input=default_10000_blocks[:1500],
         seed=b"reorg_blocks2",
@@ -430,15 +480,13 @@ def test_long_reorg_1500_blocks_light(bt, consensus_mode, default_10000_blocks):
 
 @pytest.fixture(scope="session")
 def default_2000_blocks_compact(bt, consensus_mode):
-    version = ""
-    if consensus_mode >= ConsensusMode.HARD_FORK_2_0:
-        version = "_hardfork"
+    version = test_chain_suffix(consensus_mode)
 
     from chia._tests.util.blockchain import persistent_blocks
 
     return persistent_blocks(
         2000,
-        f"test_blocks_2000_compact_{saved_blocks_version}{version}.db",
+        f"test_blocks_2000_compact_{version}.db",
         bt,
         normalized_to_identity_cc_eos=True,
         normalized_to_identity_icc_eos=True,
@@ -452,13 +500,11 @@ def default_2000_blocks_compact(bt, consensus_mode):
 def default_10000_blocks_compact(bt, consensus_mode):
     from chia._tests.util.blockchain import persistent_blocks
 
-    version = ""
-    if consensus_mode >= ConsensusMode.HARD_FORK_2_0:
-        version = "_hardfork"
+    version = test_chain_suffix(consensus_mode)
 
     return persistent_blocks(
         10000,
-        f"test_blocks_10000_compact_{saved_blocks_version}{version}.db",
+        f"test_blocks_10000_compact_{version}.db",
         bt,
         normalized_to_identity_cc_eos=True,
         normalized_to_identity_icc_eos=True,
@@ -466,6 +512,11 @@ def default_10000_blocks_compact(bt, consensus_mode):
         normalized_to_identity_cc_sp=True,
         seed=b"1000_compact",
     )
+
+
+# If you add another test chain, don't forget to also add a "build_test_chains"
+# generator to chia/_tests/blockchain/test_build_chains.py as well as a test in
+# the same file.
 
 
 @pytest.fixture(scope="function")
@@ -779,7 +830,7 @@ async def three_nodes_two_wallets(blockchain_constants: ConsensusConstants):
 @pytest.fixture(scope="function")
 async def one_node(
     blockchain_constants: ConsensusConstants,
-) -> AsyncIterator[tuple[list[Service], list[FullNodeSimulator], BlockTools]]:
+) -> AsyncIterator[tuple[list[SimulatorFullNodeService], list[WalletService], BlockTools]]:
     async with setup_simulators_and_wallets_service(1, 0, blockchain_constants) as _:
         yield _
 
@@ -787,7 +838,7 @@ async def one_node(
 @pytest.fixture(scope="function")
 async def one_node_one_block(
     blockchain_constants: ConsensusConstants,
-) -> AsyncIterator[tuple[Union[FullNodeAPI, FullNodeSimulator], ChiaServer, BlockTools]]:
+) -> AsyncIterator[tuple[FullNodeAPI | FullNodeSimulator, ChiaServer, BlockTools]]:
     async with setup_simulators_and_wallets(1, 0, blockchain_constants) as new:
         (nodes, _, bt) = make_old_setup_simulators_and_wallets(new=new)
         full_node_1 = nodes[0]
@@ -799,7 +850,6 @@ async def one_node_one_block(
             1,
             guarantee_transaction_block=True,
             farmer_reward_puzzle_hash=reward_ph,
-            pool_reward_puzzle_hash=reward_ph,
             genesis_timestamp=uint64(10000),
             time_per_block=10,
         )
@@ -828,7 +878,6 @@ async def two_nodes_one_block(blockchain_constants: ConsensusConstants):
             1,
             guarantee_transaction_block=True,
             farmer_reward_puzzle_hash=reward_ph,
-            pool_reward_puzzle_hash=reward_ph,
             genesis_timestamp=uint64(10000),
             time_per_block=10,
         )
@@ -856,7 +905,7 @@ async def farmer_one_harvester_simulator_wallet(
     ]
 ]:
     async with setup_simulators_and_wallets_service(1, 1, blockchain_constants) as (nodes, wallets, bt):
-        async with setup_farmer_multi_harvester(bt, 1, tmp_path, bt.constants, start_services=True) as (
+        async with setup_farmer_solver_multi_harvester(bt, 1, tmp_path, bt.constants, start_services=True) as (
             harvester_services,
             farmer_service,
             _,
@@ -869,31 +918,54 @@ FarmerOneHarvester = tuple[list[HarvesterService], FarmerService, BlockTools]
 
 @pytest.fixture(scope="function")
 async def farmer_one_harvester(tmp_path: Path, get_b_tools: BlockTools) -> AsyncIterator[FarmerOneHarvester]:
-    async with setup_farmer_multi_harvester(get_b_tools, 1, tmp_path, get_b_tools.constants, start_services=True) as _:
+    async with setup_farmer_solver_multi_harvester(
+        get_b_tools, 1, tmp_path, get_b_tools.constants, start_services=True
+    ) as _:
         yield _
+
+
+FarmerOneHarvesterSolver = tuple[list[HarvesterService], FarmerService, SolverService, BlockTools]
+
+
+@pytest.fixture(scope="function")
+async def farmer_one_harvester_solver(
+    tmp_path: Path, get_b_tools: BlockTools
+) -> AsyncIterator[FarmerOneHarvesterSolver]:
+    async with setup_solver(tmp_path / "solver", get_b_tools, get_b_tools.constants) as solver_service:
+        solver_peer = UnresolvedPeerInfo(get_b_tools.config["self_hostname"], solver_service._server.get_port())
+        async with setup_farmer_solver_multi_harvester(
+            get_b_tools, 1, tmp_path, get_b_tools.constants, start_services=True, solver_peer=solver_peer
+        ) as (harvester_services, farmer_service, bt):
+            yield harvester_services, farmer_service, solver_service, bt
 
 
 @pytest.fixture(scope="function")
 async def farmer_one_harvester_not_started(
     tmp_path: Path, get_b_tools: BlockTools
-) -> AsyncIterator[tuple[list[Service], Service]]:
-    async with setup_farmer_multi_harvester(get_b_tools, 1, tmp_path, get_b_tools.constants, start_services=False) as _:
+) -> AsyncIterator[tuple[list[HarvesterService], FarmerService, BlockTools]]:
+    async with setup_farmer_solver_multi_harvester(
+        get_b_tools, 1, tmp_path, get_b_tools.constants, start_services=False
+    ) as _:
         yield _
 
 
 @pytest.fixture(scope="function")
 async def farmer_two_harvester_not_started(
     tmp_path: Path, get_b_tools: BlockTools
-) -> AsyncIterator[tuple[list[Service], Service]]:
-    async with setup_farmer_multi_harvester(get_b_tools, 2, tmp_path, get_b_tools.constants, start_services=False) as _:
+) -> AsyncIterator[tuple[list[HarvesterService], FarmerService, BlockTools]]:
+    async with setup_farmer_solver_multi_harvester(
+        get_b_tools, 2, tmp_path, get_b_tools.constants, start_services=False
+    ) as _:
         yield _
 
 
 @pytest.fixture(scope="function")
 async def farmer_three_harvester_not_started(
     tmp_path: Path, get_b_tools: BlockTools
-) -> AsyncIterator[tuple[list[Service], Service]]:
-    async with setup_farmer_multi_harvester(get_b_tools, 3, tmp_path, get_b_tools.constants, start_services=False) as _:
+) -> AsyncIterator[tuple[list[HarvesterService], FarmerService, BlockTools]]:
+    async with setup_farmer_solver_multi_harvester(
+        get_b_tools, 3, tmp_path, get_b_tools.constants, start_services=False
+    ) as _:
         yield _
 
 
@@ -917,16 +989,21 @@ def get_temp_keyring():
 
 
 @pytest.fixture(scope="function")
-async def get_b_tools_1(get_temp_keyring):
-    return await create_block_tools_async(constants=test_constants_modified, keychain=get_temp_keyring)
+async def get_b_tools_1(get_temp_keyring, testrun_uid: str):
+    async with create_block_tools_async(
+        constants=test_constants_modified, keychain=get_temp_keyring, testrun_uid=testrun_uid
+    ) as bt:
+        yield bt
 
 
 @pytest.fixture(scope="function")
-async def get_b_tools(get_temp_keyring):
-    local_b_tools = await create_block_tools_async(constants=test_constants_modified, keychain=get_temp_keyring)
-    new_config = local_b_tools._config
-    local_b_tools.change_config(new_config)
-    return local_b_tools
+async def get_b_tools(get_temp_keyring, testrun_uid):
+    async with create_block_tools_async(
+        constants=test_constants_modified, keychain=get_temp_keyring, testrun_uid=testrun_uid
+    ) as local_b_tools:
+        new_config = local_b_tools._config
+        local_b_tools.change_config(new_config)
+        yield local_b_tools
 
 
 @pytest.fixture(scope="function")
@@ -1225,37 +1302,46 @@ def populated_temp_file_keyring_fixture() -> Iterator[TempKeyring]:
 
 @pytest.fixture(scope="function")
 async def farmer_harvester_2_simulators_zero_bits_plot_filter(
-    tmp_path: Path, get_temp_keyring: Keychain
+    tmp_path: Path,
+    get_temp_keyring: Keychain,
+    testrun_uid,
 ) -> AsyncIterator[
     tuple[
         FarmerService,
         HarvesterService,
-        Union[FullNodeService, SimulatorFullNodeService],
-        Union[FullNodeService, SimulatorFullNodeService],
+        FullNodeService | SimulatorFullNodeService,
+        FullNodeService | SimulatorFullNodeService,
         BlockTools,
     ]
 ]:
     zero_bit_plot_filter_consts = test_constants_modified.replace(
-        NUMBER_ZERO_BITS_PLOT_FILTER=uint8(0),
-        NUM_SPS_SUB_SLOT=uint32(8),
+        NUMBER_ZERO_BITS_PLOT_FILTER_V1=uint8(0),
+        NUM_SPS_SUB_SLOT=uint8(8),
     )
 
     async with AsyncExitStack() as async_exit_stack:
-        bt = await create_block_tools_async(
-            zero_bit_plot_filter_consts,
-            keychain=get_temp_keyring,
-        )
-
-        config_overrides: dict[str, int] = {"full_node.max_sync_wait": 0}
-
-        bts = [
-            await create_block_tools_async(
+        bt = await async_exit_stack.enter_async_context(
+            create_block_tools_async(
                 zero_bit_plot_filter_consts,
                 keychain=get_temp_keyring,
-                num_og_plots=0,
-                num_pool_plots=0,
-                num_non_keychain_plots=0,
-                config_overrides=config_overrides,
+                testrun_uid=testrun_uid,
+            )
+        )
+
+        config_overrides: dict[str, int] = {"full_node.max_sync_wait": 0, "full_node.block_creation_timeout": 10}
+
+        bts = [
+            await async_exit_stack.enter_async_context(
+                create_block_tools_async(
+                    zero_bit_plot_filter_consts,
+                    keychain=get_temp_keyring,
+                    num_og_plots=0,
+                    num_pool_plots=0,
+                    num_non_keychain_plots=0,
+                    num_v2_plots=0,
+                    config_overrides=config_overrides,
+                    testrun_uid=testrun_uid,
+                )
             )
             for _ in range(2)
         ]
@@ -1274,10 +1360,13 @@ async def farmer_harvester_2_simulators_zero_bits_plot_filter(
             )
             for index in range(len(bts))
         ]
-
-        [harvester_service], farmer_service, _ = await async_exit_stack.enter_async_context(
-            setup_farmer_multi_harvester(bt, 1, tmp_path, bt.constants, start_services=True)
-        )
+        async with setup_solver(tmp_path / "solver", bt, bt.constants) as solver_service:
+            solver_peer = UnresolvedPeerInfo(bt.config["self_hostname"], solver_service._server.get_port())
+            [harvester_service], farmer_service, _ = await async_exit_stack.enter_async_context(
+                setup_farmer_solver_multi_harvester(
+                    bt, 1, tmp_path, bt.constants, start_services=True, solver_peer=solver_peer
+                )
+            )
 
         yield farmer_service, harvester_service, simulators[0], simulators[1], bt
 

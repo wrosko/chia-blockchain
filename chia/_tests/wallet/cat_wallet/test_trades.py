@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Union
+from typing import Any
 
 import pytest
-from chia_rs import G2Element
+from chia_rs import G2Element, SpendBundle
 from chia_rs.sized_bytes import bytes32
 from chia_rs.sized_ints import uint32, uint64
 
@@ -12,23 +12,23 @@ from chia._tests.conftest import SOFTFORK_HEIGHTS
 from chia._tests.environments.wallet import WalletStateTransition, WalletTestFramework
 from chia._tests.util.get_name_puzzle_conditions import get_name_puzzle_conditions
 from chia._tests.util.time_out_assert import time_out_assert
+from chia._tests.wallet.cat_wallet.test_cat_wallet import mint_cat
 from chia._tests.wallet.vc_wallet.test_vc_wallet import mint_cr_cat
 from chia.consensus.cost_calculator import NPCResult
 from chia.consensus.default_constants import DEFAULT_CONSTANTS
 from chia.full_node.bundle_tools import simple_solution_generator
-from chia.rpc.wallet_request_types import VCAddProofs, VCGetList, VCGetProofsForRoot, VCMint, VCSpend
-from chia.types.blockchain_format.program import INFINITE_COST, Program
-from chia.types.spend_bundle import SpendBundle
+from chia.types.blockchain_format.program import INFINITE_COST, Program, run
 from chia.util.bech32m import encode_puzzle_hash
 from chia.util.hash import std_hash
 from chia.wallet.cat_wallet.cat_wallet import CATWallet
+from chia.wallet.cat_wallet.r_cat_wallet import RCATWallet
 from chia.wallet.conditions import CreateCoinAnnouncement, parse_conditions_non_consensus
 from chia.wallet.did_wallet.did_wallet import DIDWallet
 from chia.wallet.outer_puzzles import AssetType
 from chia.wallet.puzzle_drivers import PuzzleInfo
 from chia.wallet.trade_manager import TradeManager
 from chia.wallet.trade_record import TradeRecord
-from chia.wallet.trading.offer import Offer
+from chia.wallet.trading.offer import Offer, OfferSpecification
 from chia.wallet.trading.trade_status import TradeStatus
 from chia.wallet.transaction_record import TransactionRecord
 from chia.wallet.util.transaction_type import TransactionType
@@ -36,9 +36,15 @@ from chia.wallet.vc_wallet.cr_cat_drivers import ProofsChecker
 from chia.wallet.vc_wallet.cr_cat_wallet import CRCATWallet
 from chia.wallet.vc_wallet.vc_store import VCProofs
 from chia.wallet.wallet_node import WalletNode
+from chia.wallet.wallet_request_types import (
+    CRCATApprovePending,
+    VCAddProofs,
+    VCGetList,
+    VCGetProofsForRoot,
+    VCMint,
+    VCSpend,
+)
 from chia.wallet.wallet_spend_bundle import WalletSpendBundle
-
-OfferSummary = dict[Union[int, bytes32], int]
 
 
 async def get_trade_and_status(trade_manager: TradeManager, trade: TradeRecord) -> TradeStatus:
@@ -99,10 +105,12 @@ async def get_trade_and_status(trade_manager: TradeManager, trade: TradeRecord) 
     ],
     indirect=["wallet_environments"],
 )
+@pytest.mark.parametrize("wallet_type", [CATWallet, RCATWallet])
 @pytest.mark.limit_consensus_modes(reason="irrelevant")
 async def test_cat_trades(
     wallet_environments: WalletTestFramework,
     credential_restricted: bool,
+    wallet_type: type[CATWallet],
     active_softfork_height: uint32,
 ) -> None:
     # Setup
@@ -118,7 +126,7 @@ async def test_cat_trades(
 
     trusted = len(wallet_node_maker.config["trusted_peers"]) > 0
 
-    # Because making/taking CR-CATs is asymetrical, approving the hacked together aggregation test will fail
+    # Because making/taking CR-CATs is asymmetrical, approving the hacked together aggregation test will fail
     # The taker is "making" offers that it is approving with a VC which multiple actual makers would never do
     # This is really a test of CATOuterPuzzle anyways and is not correlated with any of our params
     test_aggregation = not credential_restricted and not wallet_environments.tx_config.reuse_puzhash and trusted
@@ -172,7 +180,7 @@ async def test_cat_trades(
         cat_wallet_maker: CATWallet = await CRCATWallet.get_or_create_wallet_for_cat(
             wallet_node_maker.wallet_state_manager,
             wallet_maker,
-            tail_maker.get_tree_hash().hex(),
+            tail_maker.get_tree_hash(),
             None,
             authorized_providers,
             proofs_checker_maker,
@@ -180,7 +188,7 @@ async def test_cat_trades(
         new_cat_wallet_taker: CATWallet = await CRCATWallet.get_or_create_wallet_for_cat(
             wallet_node_taker.wallet_state_manager,
             wallet_taker,
-            tail_taker.get_tree_hash().hex(),
+            tail_taker.get_tree_hash(),
             None,
             authorized_providers,
             proofs_checker_taker,
@@ -191,6 +199,7 @@ async def test_cat_trades(
             wallet_node_maker,
             client_maker,
             full_node,
+            wallet_environments.tx_config,
             authorized_providers,
             tail_maker,
             proofs_checker_maker,
@@ -201,6 +210,7 @@ async def test_cat_trades(
             wallet_node_taker,
             client_taker,
             full_node,
+            wallet_environments.tx_config,
             authorized_providers,
             tail_taker,
             proofs_checker_taker,
@@ -237,26 +247,36 @@ async def test_cat_trades(
         )
 
         # Mint some VCs that can spend the CR-CATs
-        vc_record_maker = (
-            await client_maker.vc_mint(
-                VCMint(
-                    did_id=encode_puzzle_hash(did_id_maker, "did"),
-                    target_address=encode_puzzle_hash(await wallet_maker.get_new_puzzlehash(), "txch"),
-                    push=True,
-                ),
-                wallet_environments.tx_config,
-            )
-        ).vc_record
-        vc_record_taker = (
-            await client_taker.vc_mint(
-                VCMint(
-                    did_id=encode_puzzle_hash(did_id_taker, "did"),
-                    target_address=encode_puzzle_hash(await wallet_taker.get_new_puzzlehash(), "txch"),
-                    push=True,
-                ),
-                wallet_environments.tx_config,
-            )
-        ).vc_record
+        async with env_maker.wallet_state_manager.new_action_scope(
+            wallet_environments.tx_config, push=True
+        ) as action_scope:
+            vc_record_maker = (
+                await client_maker.vc_mint(
+                    VCMint(
+                        did_id=encode_puzzle_hash(did_id_maker, "did"),
+                        target_address=encode_puzzle_hash(
+                            await action_scope.get_puzzle_hash(env_maker.wallet_state_manager), "txch"
+                        ),
+                        push=True,
+                    ),
+                    wallet_environments.tx_config,
+                )
+            ).vc_record
+        async with env_taker.wallet_state_manager.new_action_scope(
+            wallet_environments.tx_config, push=True
+        ) as action_scope:
+            vc_record_taker = (
+                await client_taker.vc_mint(
+                    VCMint(
+                        did_id=encode_puzzle_hash(did_id_taker, "did"),
+                        target_address=encode_puzzle_hash(
+                            await action_scope.get_puzzle_hash(env_taker.wallet_state_manager), "txch"
+                        ),
+                        push=True,
+                    ),
+                    wallet_environments.tx_config,
+                )
+            ).vc_record
         await wallet_environments.process_pending_states(
             [
                 # Balance checking for this scenario is covered in tests/wallet/vc_wallet/test_vc_lifecycle
@@ -343,58 +363,17 @@ async def test_cat_trades(
         }
 
         # Mint some standard CATs
-        async with wallet_maker.wallet_state_manager.new_action_scope(
-            wallet_environments.tx_config, push=True
-        ) as action_scope:
-            cat_wallet_maker = await CATWallet.create_new_cat_wallet(
-                wallet_node_maker.wallet_state_manager,
-                wallet_maker,
-                {"identifier": "genesis_by_id"},
-                uint64(100),
-                action_scope,
-            )
-
-        async with wallet_taker.wallet_state_manager.new_action_scope(
-            wallet_environments.tx_config, push=True
-        ) as action_scope:
-            new_cat_wallet_taker = await CATWallet.create_new_cat_wallet(
-                wallet_node_taker.wallet_state_manager,
-                wallet_taker,
-                {"identifier": "genesis_by_id"},
-                uint64(100),
-                action_scope,
-            )
-
-        await wallet_environments.process_pending_states(
-            [
-                # Balance checking for this scenario is covered in test_cat_wallet
-                WalletStateTransition(
-                    pre_block_balance_updates={
-                        "xch": {"set_remainder": True},
-                        "cat": {"init": True, "set_remainder": True},
-                    },
-                    post_block_balance_updates={
-                        "xch": {"set_remainder": True},
-                        "cat": {"set_remainder": True},
-                    },
-                ),
-                WalletStateTransition(
-                    pre_block_balance_updates={
-                        "xch": {"set_remainder": True},
-                        "new cat": {"init": True, "set_remainder": True},
-                    },
-                    post_block_balance_updates={
-                        "xch": {"set_remainder": True},
-                        "new cat": {"set_remainder": True},
-                    },
-                ),
-            ]
+        cat_wallet_maker = await mint_cat(
+            wallet_environments, env_maker, "xch", "cat", uint64(100), wallet_type, "cat maker"
+        )
+        new_cat_wallet_taker = await mint_cat(
+            wallet_environments, env_taker, "xch", "new cat", uint64(100), wallet_type, "cat taker"
         )
 
     if credential_restricted:
         await client_maker.vc_add_proofs(VCAddProofs.from_vc_proofs(proofs_maker))
         assert (
-            await client_maker.vc_get_proofs_for_root(VCGetProofsForRoot(proof_root_maker))
+            await client_maker.vc_get_proofs_for_root(VCGetProofsForRoot(root=proof_root_maker))
         ).to_vc_proofs().key_value_pairs == proofs_maker.key_value_pairs
         get_list_reponse = await client_maker.vc_get_list(VCGetList())
         assert len(get_list_reponse.vc_records) == 1
@@ -402,7 +381,7 @@ async def test_cat_trades(
 
         await client_taker.vc_add_proofs(VCAddProofs.from_vc_proofs(proofs_taker))
         assert (
-            await client_taker.vc_get_proofs_for_root(VCGetProofsForRoot(proof_root_taker))
+            await client_taker.vc_get_proofs_for_root(VCGetProofsForRoot(root=proof_root_taker))
         ).to_vc_proofs().key_value_pairs == proofs_taker.key_value_pairs
         get_list_reponse = await client_taker.vc_get_list(VCGetList())
         assert len(get_list_reponse.vc_records) == 1
@@ -419,8 +398,12 @@ async def test_cat_trades(
             proofs_checker_taker,
         )
     else:
-        new_cat_wallet_maker = await CATWallet.get_or_create_wallet_for_cat(
-            wallet_node_maker.wallet_state_manager, wallet_maker, new_cat_wallet_taker.get_asset_id()
+        if wallet_type is RCATWallet:
+            extra_args: Any = (bytes32.zeros,)
+        else:
+            extra_args = tuple()
+        new_cat_wallet_maker = await wallet_type.get_or_create_wallet_for_cat(
+            wallet_node_maker.wallet_state_manager, wallet_maker, new_cat_wallet_taker.get_asset_id(), *extra_args
         )
 
     await env_maker.change_balances(
@@ -439,29 +422,29 @@ async def test_cat_trades(
     await env_maker.check_balances()
 
     # Create the trade parameters
-    chia_for_cat: OfferSummary = {
+    chia_for_cat: OfferSpecification = {
         wallet_maker.id(): -1,
-        bytes32.from_hexstr(new_cat_wallet_maker.get_asset_id()): 2,  # This is the CAT that the taker made
+        new_cat_wallet_maker.get_asset_id(): 2,  # This is the CAT that the taker made
     }
-    cat_for_chia: OfferSummary = {
+    cat_for_chia: OfferSpecification = {
         wallet_maker.id(): 3,
         cat_wallet_maker.id(): -4,  # The taker has no knowledge of this CAT yet
     }
-    cat_for_cat: OfferSummary = {
-        bytes32.from_hexstr(cat_wallet_maker.get_asset_id()): -5,
+    cat_for_cat: OfferSpecification = {
+        cat_wallet_maker.get_asset_id(): -5,
         new_cat_wallet_maker.id(): 6,
     }
-    chia_for_multiple_cat: OfferSummary = {
+    chia_for_multiple_cat: OfferSpecification = {
         wallet_maker.id(): -7,
         cat_wallet_maker.id(): 8,
         new_cat_wallet_maker.id(): 9,
     }
-    multiple_cat_for_chia: OfferSummary = {
+    multiple_cat_for_chia: OfferSpecification = {
         wallet_maker.id(): 10,
         cat_wallet_maker.id(): -11,
         new_cat_wallet_maker.id(): -12,
     }
-    chia_and_cat_for_cat: OfferSummary = {
+    chia_and_cat_for_cat: OfferSpecification = {
         wallet_maker.id(): -13,
         cat_wallet_maker.id(): -14,
         new_cat_wallet_maker.id(): 15,
@@ -469,10 +452,10 @@ async def test_cat_trades(
 
     driver_dict: dict[bytes32, PuzzleInfo] = {}
     for wallet in (cat_wallet_maker, new_cat_wallet_maker):
-        asset_id: str = wallet.get_asset_id()
+        asset_id = wallet.get_asset_id()
         driver_item: dict[str, Any] = {
             "type": AssetType.CAT.value,
-            "tail": "0x" + asset_id,
+            "tail": "0x" + asset_id.hex(),
         }
         if credential_restricted:
             driver_item["also"] = {
@@ -484,7 +467,7 @@ async def test_cat_trades(
                     else proofs_checker_taker.as_program()
                 ),
             }
-        driver_dict[bytes32.from_hexstr(asset_id)] = PuzzleInfo(driver_item)
+        driver_dict[asset_id] = PuzzleInfo(driver_item)
 
     trade_manager_maker = env_maker.wallet_state_manager.trade_manager
     trade_manager_taker = env_taker.wallet_state_manager.trade_manager
@@ -583,7 +566,7 @@ async def test_cat_trades(
                         "pending_coin_removal_count": 1,
                         "<=#spendable_balance": -2,
                         "<=#max_send_amount": -2,
-                        # Unconfirmed balance doesn't change because receiveing 1 XCH and spending 1 in fee
+                        # Unconfirmed balance doesn't change because receiving 1 XCH and spending 1 in fee
                         "unconfirmed_wallet_balance": 0,
                         ">=#pending_change": 1,  # any amount increase
                     },
@@ -610,7 +593,7 @@ async def test_cat_trades(
                         "unspent_coin_count": 1,
                         ">#spendable_balance": 0,
                         ">#max_send_amount": 0,
-                        # Confirmed balance doesn't change because receiveing 1 XCH and spending 1 in fee
+                        # Confirmed balance doesn't change because receiving 1 XCH and spending 1 in fee
                         "confirmed_wallet_balance": 0,
                         "<=#pending_change": 1,  # any amount decrease
                     },
@@ -637,8 +620,7 @@ async def test_cat_trades(
 
     if credential_restricted:
         await client_maker.crcat_approve_pending(
-            new_cat_wallet_maker.id(),
-            uint64(2),
+            CRCATApprovePending(wallet_id=new_cat_wallet_maker.id(), min_amount_to_claim=uint64(2), push=True),
             wallet_environments.tx_config,
         )
 
@@ -977,8 +959,7 @@ async def test_cat_trades(
 
     if credential_restricted:
         await client_maker.crcat_approve_pending(
-            new_cat_wallet_maker.id(),
-            uint64(6),
+            CRCATApprovePending(wallet_id=new_cat_wallet_maker.id(), min_amount_to_claim=uint64(6), push=True),
             wallet_environments.tx_config,
         )
 
@@ -1215,8 +1196,7 @@ async def test_cat_trades(
 
     if credential_restricted:
         await client_maker.crcat_approve_pending(
-            cat_wallet_maker.id(),
-            uint64(8),
+            CRCATApprovePending(wallet_id=cat_wallet_maker.id(), min_amount_to_claim=uint64(8), push=True),
             wallet_environments.tx_config,
         )
 
@@ -1262,8 +1242,7 @@ async def test_cat_trades(
         )
 
         await client_maker.crcat_approve_pending(
-            new_cat_wallet_maker.id(),
-            uint64(9),
+            CRCATApprovePending(wallet_id=new_cat_wallet_maker.id(), min_amount_to_claim=uint64(9), push=True),
             wallet_environments.tx_config,
         )
 
@@ -1585,8 +1564,7 @@ async def test_cat_trades(
 
     if credential_restricted:
         await client_maker.crcat_approve_pending(
-            new_cat_wallet_maker.id(),
-            uint64(15),
+            CRCATApprovePending(wallet_id=new_cat_wallet_maker.id(), min_amount_to_claim=uint64(15), push=True),
             wallet_environments.tx_config,
         )
 
@@ -1653,8 +1631,9 @@ async def test_cat_trades(
     indirect=True,
 )
 @pytest.mark.limit_consensus_modes(reason="irrelevant")
+@pytest.mark.parametrize("wallet_type", [CATWallet, RCATWallet])
 @pytest.mark.anyio
-async def test_trade_cancellation(wallet_environments: WalletTestFramework) -> None:
+async def test_trade_cancellation(wallet_environments: WalletTestFramework, wallet_type: type[CATWallet]) -> None:
     env_maker = wallet_environments.environments[0]
     env_taker = wallet_environments.environments[1]
 
@@ -1669,16 +1648,15 @@ async def test_trade_cancellation(wallet_environments: WalletTestFramework) -> N
 
     xch_to_cat_amount = uint64(100)
 
-    async with env_maker.wallet_state_manager.new_action_scope(
-        wallet_environments.tx_config, push=True
-    ) as action_scope:
-        cat_wallet_maker = await CATWallet.create_new_cat_wallet(
-            env_maker.wallet_state_manager,
-            env_maker.xch_wallet,
-            {"identifier": "genesis_by_id"},
-            xch_to_cat_amount,
-            action_scope,
-        )
+    cat_wallet_maker = await mint_cat(
+        wallet_environments,
+        env_maker,
+        "xch",
+        "cat",
+        xch_to_cat_amount,
+        wallet_type,
+        "cat",
+    )
 
     await wallet_environments.process_pending_states(
         [
@@ -1697,12 +1675,12 @@ async def test_trade_cancellation(wallet_environments: WalletTestFramework) -> N
         ]
     )
 
-    cat_for_chia: OfferSummary = {
+    cat_for_chia: OfferSpecification = {
         env_maker.wallet_aliases["xch"]: 1,
         env_maker.wallet_aliases["cat"]: -2,
     }
 
-    chia_for_cat: OfferSummary = {
+    chia_for_cat: OfferSpecification = {
         env_maker.wallet_aliases["xch"]: -3,
         env_maker.wallet_aliases["cat"]: 4,
     }
@@ -1829,7 +1807,7 @@ async def test_trade_cancellation(wallet_environments: WalletTestFramework) -> N
     # This take should fail since we have no CATs to fulfill it with
     with pytest.raises(
         ValueError,
-        match=f"Do not have a wallet for asset ID: {cat_wallet_maker.get_asset_id()} to fulfill offer",
+        match=f"Do not have a wallet for asset ID: {cat_wallet_maker.get_asset_id().hex()} to fulfill offer",
     ):
         async with env_taker.wallet_state_manager.new_action_scope(
             wallet_environments.tx_config, push=False
@@ -1870,7 +1848,7 @@ async def test_trade_cancellation(wallet_environments: WalletTestFramework) -> N
     await time_out_assert(15, get_trade_and_status, TradeStatus.CANCELLED, trade_manager_maker, trade_make)
 
     # Now let's test the case where two coins need to be spent in order to cancel
-    chia_and_cat_for_something: OfferSummary = {
+    chia_and_cat_for_something: OfferSpecification = {
         env_maker.wallet_aliases["xch"]: -5,
         env_maker.wallet_aliases["cat"]: -6,
         bytes32.zeros: 1,  # Doesn't matter
@@ -1906,7 +1884,7 @@ async def test_trade_cancellation(wallet_environments: WalletTestFramework) -> N
             [
                 c.to_program()
                 for c in parse_conditions_non_consensus(
-                    spend.puzzle_reveal.to_program().run(spend.solution.to_program()).as_iter(), abstractions=False
+                    run(spend.puzzle_reveal, Program.from_serialized(spend.solution)).as_iter(), abstractions=False
                 )
             ]
         )
@@ -1965,8 +1943,9 @@ async def test_trade_cancellation(wallet_environments: WalletTestFramework) -> N
     indirect=True,
 )
 @pytest.mark.limit_consensus_modes(reason="irrelevant")
+@pytest.mark.parametrize("wallet_type", [CATWallet, RCATWallet])
 @pytest.mark.anyio
-async def test_trade_conflict(wallet_environments: WalletTestFramework) -> None:
+async def test_trade_conflict(wallet_environments: WalletTestFramework, wallet_type: type[CATWallet]) -> None:
     env_maker = wallet_environments.environments[0]
     env_taker = wallet_environments.environments[1]
     env_trader = wallet_environments.environments[2]
@@ -1987,16 +1966,15 @@ async def test_trade_conflict(wallet_environments: WalletTestFramework) -> None:
     xch_to_cat_amount = uint64(100)
     fee = uint64(10)
 
-    async with env_maker.wallet_state_manager.new_action_scope(
-        wallet_environments.tx_config, push=True
-    ) as action_scope:
-        await CATWallet.create_new_cat_wallet(
-            env_maker.wallet_state_manager,
-            env_maker.xch_wallet,
-            {"identifier": "genesis_by_id"},
-            xch_to_cat_amount,
-            action_scope,
-        )
+    await mint_cat(
+        wallet_environments,
+        env_maker,
+        "xch",
+        "cat",
+        xch_to_cat_amount,
+        wallet_type,
+        "cat",
+    )
 
     await wallet_environments.process_pending_states(
         [
@@ -2015,7 +1993,7 @@ async def test_trade_conflict(wallet_environments: WalletTestFramework) -> None:
         ]
     )
 
-    cat_for_chia: OfferSummary = {
+    cat_for_chia: OfferSpecification = {
         env_maker.wallet_aliases["xch"]: 1000,
         env_maker.wallet_aliases["cat"]: -4,
     }
@@ -2162,8 +2140,9 @@ async def test_trade_conflict(wallet_environments: WalletTestFramework) -> None:
     indirect=True,
 )
 @pytest.mark.limit_consensus_modes(reason="irrelevant")
+@pytest.mark.parametrize("wallet_type", [CATWallet, RCATWallet])
 @pytest.mark.anyio
-async def test_trade_bad_spend(wallet_environments: WalletTestFramework) -> None:
+async def test_trade_bad_spend(wallet_environments: WalletTestFramework, wallet_type: type[CATWallet]) -> None:
     env_maker = wallet_environments.environments[0]
     env_taker = wallet_environments.environments[1]
 
@@ -2178,16 +2157,15 @@ async def test_trade_bad_spend(wallet_environments: WalletTestFramework) -> None
 
     xch_to_cat_amount = uint64(100)
 
-    async with env_maker.wallet_state_manager.new_action_scope(
-        wallet_environments.tx_config, push=True
-    ) as action_scope:
-        await CATWallet.create_new_cat_wallet(
-            env_maker.wallet_state_manager,
-            env_maker.xch_wallet,
-            {"identifier": "genesis_by_id"},
-            xch_to_cat_amount,
-            action_scope,
-        )
+    await mint_cat(
+        wallet_environments,
+        env_maker,
+        "xch",
+        "cat",
+        xch_to_cat_amount,
+        wallet_type,
+        "cat",
+    )
 
     await wallet_environments.process_pending_states(
         [
@@ -2206,7 +2184,7 @@ async def test_trade_bad_spend(wallet_environments: WalletTestFramework) -> None
         ]
     )
 
-    cat_for_chia: OfferSummary = {
+    cat_for_chia: OfferSpecification = {
         env_maker.wallet_aliases["xch"]: 1000,
         env_maker.wallet_aliases["cat"]: -4,
     }
@@ -2284,8 +2262,9 @@ async def test_trade_bad_spend(wallet_environments: WalletTestFramework) -> None
     indirect=True,
 )
 @pytest.mark.limit_consensus_modes(reason="irrelevant")
+@pytest.mark.parametrize("wallet_type", [CATWallet, RCATWallet])
 @pytest.mark.anyio
-async def test_trade_high_fee(wallet_environments: WalletTestFramework) -> None:
+async def test_trade_high_fee(wallet_environments: WalletTestFramework, wallet_type: type[CATWallet]) -> None:
     env_maker = wallet_environments.environments[0]
     env_taker = wallet_environments.environments[1]
 
@@ -2300,16 +2279,15 @@ async def test_trade_high_fee(wallet_environments: WalletTestFramework) -> None:
 
     xch_to_cat_amount = uint64(100)
 
-    async with env_maker.wallet_state_manager.new_action_scope(
-        wallet_environments.tx_config, push=True
-    ) as action_scope:
-        await CATWallet.create_new_cat_wallet(
-            env_maker.wallet_state_manager,
-            env_maker.xch_wallet,
-            {"identifier": "genesis_by_id"},
-            xch_to_cat_amount,
-            action_scope,
-        )
+    await mint_cat(
+        wallet_environments,
+        env_maker,
+        "xch",
+        "cat",
+        xch_to_cat_amount,
+        wallet_type,
+        "cat",
+    )
 
     await wallet_environments.process_pending_states(
         [
@@ -2328,7 +2306,7 @@ async def test_trade_high_fee(wallet_environments: WalletTestFramework) -> None:
         ]
     )
 
-    cat_for_chia: OfferSummary = {
+    cat_for_chia: OfferSpecification = {
         env_maker.wallet_aliases["xch"]: 1000,
         env_maker.wallet_aliases["cat"]: -4,
     }
@@ -2429,8 +2407,9 @@ async def test_trade_high_fee(wallet_environments: WalletTestFramework) -> None:
     indirect=True,
 )
 @pytest.mark.limit_consensus_modes(reason="irrelevant")
+@pytest.mark.parametrize("wallet_type", [CATWallet, RCATWallet])
 @pytest.mark.anyio
-async def test_aggregated_trade_state(wallet_environments: WalletTestFramework) -> None:
+async def test_aggregated_trade_state(wallet_environments: WalletTestFramework, wallet_type: type[CATWallet]) -> None:
     env_maker = wallet_environments.environments[0]
     env_taker = wallet_environments.environments[1]
 
@@ -2445,16 +2424,15 @@ async def test_aggregated_trade_state(wallet_environments: WalletTestFramework) 
 
     xch_to_cat_amount = uint64(100)
 
-    async with env_maker.wallet_state_manager.new_action_scope(
-        wallet_environments.tx_config, push=True
-    ) as action_scope:
-        await CATWallet.create_new_cat_wallet(
-            env_maker.wallet_state_manager,
-            env_maker.xch_wallet,
-            {"identifier": "genesis_by_id"},
-            xch_to_cat_amount,
-            action_scope,
-        )
+    await mint_cat(
+        wallet_environments,
+        env_maker,
+        "xch",
+        "cat",
+        xch_to_cat_amount,
+        wallet_type,
+        "cat",
+    )
 
     await wallet_environments.process_pending_states(
         [
@@ -2473,15 +2451,15 @@ async def test_aggregated_trade_state(wallet_environments: WalletTestFramework) 
         ]
     )
 
-    cat_for_chia: OfferSummary = {
+    cat_for_chia: OfferSpecification = {
         env_maker.wallet_aliases["xch"]: 2,
         env_maker.wallet_aliases["cat"]: -2,
     }
-    chia_for_cat: OfferSummary = {
+    chia_for_cat: OfferSpecification = {
         env_maker.wallet_aliases["xch"]: -1,
         env_maker.wallet_aliases["cat"]: 1,
     }
-    combined_summary: OfferSummary = {
+    combined_summary: OfferSpecification = {
         env_maker.wallet_aliases["xch"]: cat_for_chia[env_maker.wallet_aliases["xch"]]
         + chia_for_cat[env_maker.wallet_aliases["xch"]],
         env_maker.wallet_aliases["cat"]: cat_for_chia[env_maker.wallet_aliases["cat"]]

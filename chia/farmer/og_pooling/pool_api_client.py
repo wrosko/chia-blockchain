@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 from aiohttp import ClientSession, ClientTimeout
 
@@ -20,12 +20,12 @@ class PoolApiClient:
         self.base_url = base_url
         self.ssl_context = ssl_context_for_root(get_mozilla_ca_crt())
 
-    async def get_pool_info(self) -> Dict[str, Any]:
+    async def get_pool_info(self) -> dict[str, Any]:
         async with ClientSession(timeout=default_timeout) as client:
             async with client.get(f"{self.base_url}/pool_info", ssl=self.ssl_context) as res:
                 return await res.json()
 
-    async def submit_partial(self, submit_partial: SubmitPartial) -> Dict[str, Any]:
+    async def submit_partial(self, submit_partial: SubmitPartial) -> dict[str, Any]:
         async with ClientSession(timeout=default_timeout) as client:
             async with client.post(
                     f"{self.base_url}/partial",
@@ -35,7 +35,7 @@ class PoolApiClient:
             ) as res:
                 return await res.json()
 
-    async def get_farmer(self, pool_public_key: str) -> Dict[str, Any]:
+    async def get_farmer(self, pool_public_key: str) -> dict[str, Any]:
         async with ClientSession(timeout=get_farmer_timeout) as client:
             async with client.get(
                     f"{self.base_url}/farmer",

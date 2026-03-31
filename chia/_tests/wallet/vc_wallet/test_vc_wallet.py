@@ -1,19 +1,17 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Awaitable
-from typing import Any, Callable, Optional
+from collections.abc import Awaitable, Callable
+from typing import Any, Literal
 
 import pytest
 from chia_rs import G2Element
 from chia_rs.sized_bytes import bytes32
-from chia_rs.sized_ints import uint64
-from typing_extensions import Literal
+from chia_rs.sized_ints import uint8, uint16, uint32, uint64
 
+from chia._tests.conftest import ConsensusMode
 from chia._tests.environments.wallet import WalletEnvironment, WalletStateTransition, WalletTestFramework
 from chia._tests.util.time_out_assert import time_out_assert_not_none
-from chia.rpc.wallet_request_types import VCAddProofs, VCGet, VCGetList, VCGetProofsForRoot, VCMint, VCRevoke, VCSpend
-from chia.rpc.wallet_rpc_client import WalletRpcClient
 from chia.simulator.full_node_simulator import FullNodeSimulator
 from chia.types.blockchain_format.coin import coin_as_list
 from chia.types.blockchain_format.program import Program
@@ -25,13 +23,30 @@ from chia.wallet.cat_wallet.cat_wallet import CATWallet
 from chia.wallet.did_wallet.did_wallet import DIDWallet
 from chia.wallet.util.query_filter import TransactionTypeFilter
 from chia.wallet.util.transaction_type import TransactionType
-from chia.wallet.util.tx_config import DEFAULT_TX_CONFIG
+from chia.wallet.util.tx_config import DEFAULT_TX_CONFIG, TXConfig
 from chia.wallet.util.wallet_types import WalletType
 from chia.wallet.vc_wallet.cr_cat_drivers import ProofsChecker, construct_cr_layer
 from chia.wallet.vc_wallet.cr_cat_wallet import CRCATWallet
 from chia.wallet.vc_wallet.vc_store import VCProofs, VCRecord
 from chia.wallet.wallet import Wallet
 from chia.wallet.wallet_node import WalletNode
+from chia.wallet.wallet_request_types import (
+    Addition,
+    CATSpend,
+    CRCATApprovePending,
+    CreateSignedTransaction,
+    GetTransactions,
+    GetWallets,
+    VCAddProofs,
+    VCGet,
+    VCGetList,
+    VCGetProofsForRoot,
+    VCMint,
+    VCRevoke,
+    VCSpend,
+    WalletInfoResponse,
+)
+from chia.wallet.wallet_rpc_client import WalletRpcClient
 from chia.wallet.wallet_spend_bundle import WalletSpendBundle
 
 
@@ -41,11 +56,13 @@ async def mint_cr_cat(
     wallet_node_0: WalletNode,
     client_0: WalletRpcClient,
     full_node_api: FullNodeSimulator,
+    tx_config: TXConfig,
     authorized_providers: list[bytes32] = [],
-    tail: Program = Program.to(None),
+    tail: Program = Program.NIL,
     proofs_checker: ProofsChecker = ProofsChecker(["foo", "bar"]),
 ) -> None:
-    our_puzzle: Program = await wallet_0.get_new_puzzle()
+    async with wallet_0.wallet_state_manager.new_action_scope(tx_config, push=True) as action_scope:
+        our_puzzle = await action_scope.get_puzzle(wallet_0.wallet_state_manager)
     cat_puzzle: Program = construct_cat_puzzle(
         CAT_MOD,
         tail.get_tree_hash(),
@@ -56,14 +73,16 @@ async def mint_cr_cat(
     await full_node_api.wait_for_wallet_synced(wallet_node=wallet_node_0, timeout=20)
     tx = (
         await client_0.create_signed_transactions(
-            [
-                {
-                    "puzzle_hash": cat_puzzle.get_tree_hash(),
-                    "amount": CAT_AMOUNT_0,
-                }
-            ],
-            DEFAULT_TX_CONFIG,
-            wallet_id=1,
+            CreateSignedTransaction(
+                wallet_id=uint32(1),
+                additions=[
+                    Addition(
+                        puzzle_hash=cat_puzzle.get_tree_hash(),
+                        amount=CAT_AMOUNT_0,
+                    )
+                ],
+            ),
+            tx_config,
         )
     ).signed_tx
     spend_bundle = tx.spend_bundle
@@ -124,6 +143,7 @@ async def mint_cr_cat(
     ],
     indirect=True,
 )
+@pytest.mark.limit_consensus_modes(allowed=[ConsensusMode.HARD_FORK_2_0])
 @pytest.mark.anyio
 async def test_vc_lifecycle(wallet_environments: WalletTestFramework) -> None:
     # Setup
@@ -151,7 +171,7 @@ async def test_vc_lifecycle(wallet_environments: WalletTestFramework) -> None:
     }
 
     # Generate DID as an "authorized provider"
-    async with wallet_0.wallet_state_manager.new_action_scope(DEFAULT_TX_CONFIG, push=True) as action_scope:
+    async with wallet_0.wallet_state_manager.new_action_scope(wallet_environments.tx_config, push=True) as action_scope:
         did_id: bytes32 = bytes32.from_hexstr(
             (
                 await DIDWallet.create_new_did_wallet(
@@ -159,13 +179,16 @@ async def test_vc_lifecycle(wallet_environments: WalletTestFramework) -> None:
                 )
             ).get_my_DID()
         )
+    await full_node_api.wait_for_wallet_synced(wallet_node_0)
 
     # Mint a VC
+    async with wallet_0.wallet_state_manager.new_action_scope(wallet_environments.tx_config, push=True) as action_scope:
+        ph = await action_scope.get_puzzle_hash(wallet_0.wallet_state_manager)
     vc_record = (
         await client_0.vc_mint(
             VCMint(
                 did_id=encode_puzzle_hash(did_id, "did"),
-                target_address=encode_puzzle_hash(await wallet_0.get_new_puzzlehash(), "txch"),
+                target_address=encode_puzzle_hash(ph, "txch"),
                 fee=uint64(1_750_000_000_000),
                 push=True,
             ),
@@ -219,7 +242,7 @@ async def test_vc_lifecycle(wallet_environments: WalletTestFramework) -> None:
             WalletStateTransition(),
         ]
     )
-    new_vc_record: Optional[VCRecord] = (await client_0.vc_get(VCGet(vc_record.vc.launcher_id))).vc_record
+    new_vc_record: VCRecord | None = (await client_0.vc_get(VCGet(vc_id=vc_record.vc.launcher_id))).vc_record
     assert new_vc_record is not None
 
     # Spend VC
@@ -275,7 +298,7 @@ async def test_vc_lifecycle(wallet_environments: WalletTestFramework) -> None:
             WalletStateTransition(),
         ]
     )
-    vc_record_updated: Optional[VCRecord] = (await client_0.vc_get(VCGet(vc_record.vc.launcher_id))).vc_record
+    vc_record_updated: VCRecord | None = (await client_0.vc_get(VCGet(vc_id=vc_record.vc.launcher_id))).vc_record
     assert vc_record_updated is not None
     assert vc_record_updated.vc.proof_hash == proof_root
 
@@ -304,14 +327,14 @@ async def test_vc_lifecycle(wallet_environments: WalletTestFramework) -> None:
     # Doing it again just to make sure it doesn't care
     await client_0.vc_add_proofs(VCAddProofs.from_vc_proofs(proofs))
     assert (
-        await client_0.vc_get_proofs_for_root(VCGetProofsForRoot(proof_root))
+        await client_0.vc_get_proofs_for_root(VCGetProofsForRoot(root=proof_root))
     ).to_vc_proofs().key_value_pairs == proofs.key_value_pairs
     get_list_reponse = await client_0.vc_get_list(VCGetList())
     assert len(get_list_reponse.vc_records) == 1
     assert get_list_reponse.proof_dict[proof_root] == proofs.key_value_pairs
 
     # Mint CR-CAT
-    await mint_cr_cat(1, wallet_0, wallet_node_0, client_0, full_node_api, [did_id])
+    await mint_cr_cat(1, wallet_0, wallet_node_0, client_0, full_node_api, wallet_environments.tx_config, [did_id])
     await wallet_environments.process_pending_states(
         [
             WalletStateTransition(
@@ -351,25 +374,32 @@ async def test_vc_lifecycle(wallet_environments: WalletTestFramework) -> None:
         wallet_node_0.wallet_state_manager.main_wallet,
         (await wallet_node_0.wallet_state_manager.get_all_wallet_info_entries(wallet_type=WalletType.CRCAT))[0],
     )
-    assert {
-        "data": bytes(cr_cat_wallet_0.info).hex(),
-        "id": env_0.dealias_wallet_id("crcat"),
-        "name": cr_cat_wallet_0.get_name(),
-        "type": cr_cat_wallet_0.type(),
-        "authorized_providers": [p.hex() for p in cr_cat_wallet_0.info.authorized_providers],
-        "flags_needed": cr_cat_wallet_0.info.proofs_checker.flags,
-    } == (await client_0.get_wallets(wallet_type=cr_cat_wallet_0.type()))[0]
+    assert (
+        WalletInfoResponse(
+            data=bytes(cr_cat_wallet_0.info).hex(),
+            id=env_0.dealias_wallet_id("crcat"),
+            name=cr_cat_wallet_0.get_name(),
+            type=uint8(cr_cat_wallet_0.type()),
+            authorized_providers=cr_cat_wallet_0.info.authorized_providers,
+            flags_needed=cr_cat_wallet_0.info.proofs_checker.flags,
+        )
+        == (await client_0.get_wallets(GetWallets(type=uint16(cr_cat_wallet_0.type())))).wallets[0]
+    )
     assert await wallet_node_0.wallet_state_manager.get_wallet_for_asset_id(cr_cat_wallet_0.get_asset_id()) is not None
-    wallet_1_ph = await wallet_1.get_new_puzzlehash()
+    async with wallet_1.wallet_state_manager.new_action_scope(wallet_environments.tx_config, push=True) as action_scope:
+        wallet_1_ph = await action_scope.get_puzzle_hash(wallet_1.wallet_state_manager)
     wallet_1_addr = encode_puzzle_hash(wallet_1_ph, "txch")
     txs = (
         await client_0.cat_spend(
-            cr_cat_wallet_0.id(),
+            CATSpend(
+                wallet_id=cr_cat_wallet_0.id(),
+                amount=uint64(90),
+                inner_address=wallet_1_addr,
+                fee=uint64(2000000000),
+                memos=["hey"],
+                push=True,
+            ),
             wallet_environments.tx_config,
-            uint64(90),
-            wallet_1_addr,
-            uint64(2000000000),
-            memos=["hey"],
         )
     ).transactions
     await wallet_environments.process_pending_states(
@@ -436,18 +466,24 @@ async def test_vc_lifecycle(wallet_environments: WalletTestFramework) -> None:
     assert await wallet_node_1.wallet_state_manager.wallets[env_1.dealias_wallet_id("crcat")].match_hinted_coin(
         next(c for tx in txs for c in tx.additions if c.amount == 90), wallet_1_ph
     )
-    pending_tx = await client_1.get_transactions(
-        env_1.dealias_wallet_id("crcat"),
-        0,
-        1,
-        reverse=True,
-        type_filter=TransactionTypeFilter.include([TransactionType.INCOMING_CRCAT_PENDING]),
-    )
+    pending_tx = (
+        await client_1.get_transactions(
+            GetTransactions(
+                wallet_id=uint32(env_1.dealias_wallet_id("crcat")),
+                start=uint32(0),
+                end=uint32(1),
+                reverse=True,
+                type_filter=TransactionTypeFilter.include([TransactionType.INCOMING_CRCAT_PENDING]),
+            )
+        )
+    ).transactions
     assert len(pending_tx) == 1
 
     # Send the VC to wallet_1 to use for the CR-CATs
+    async with wallet_1.wallet_state_manager.new_action_scope(wallet_environments.tx_config, push=True) as action_scope:
+        ph = await action_scope.get_puzzle_hash(wallet_1.wallet_state_manager)
     await client_0.vc_spend(
-        VCSpend(vc_id=vc_record.vc.launcher_id, new_puzhash=await wallet_1.get_new_puzzlehash(), push=True),
+        VCSpend(vc_id=vc_record.vc.launcher_id, new_puzhash=ph, push=True),
         wallet_environments.tx_config,
     )
     await wallet_environments.process_pending_states(
@@ -476,10 +512,10 @@ async def test_vc_lifecycle(wallet_environments: WalletTestFramework) -> None:
 
     # Claim the pending approval to our wallet
     await client_1.crcat_approve_pending(
-        env_1.dealias_wallet_id("crcat"),
-        uint64(90),
+        CRCATApprovePending(
+            wallet_id=env_1.dealias_wallet_id("crcat"), min_amount_to_claim=uint64(90), fee=uint64(90), push=True
+        ),
         wallet_environments.tx_config,
-        fee=uint64(90),
     )
     await wallet_environments.process_pending_states(
         [
@@ -532,10 +568,12 @@ async def test_vc_lifecycle(wallet_environments: WalletTestFramework) -> None:
     # (Negative test) Try to spend a CR-CAT that we don't have a valid VC for
     with pytest.raises(ValueError):
         await client_0.cat_spend(
-            cr_cat_wallet_0.id(),
-            wallet_environments.tx_config,
-            uint64(10),
-            wallet_1_addr,
+            CATSpend(
+                wallet_id=cr_cat_wallet_0.id(),
+                amount=uint64(10),
+                inner_address=wallet_1_addr,
+            ),
+            tx_config=wallet_environments.tx_config,
         )
 
     # Test melting a CRCAT
@@ -543,12 +581,17 @@ async def test_vc_lifecycle(wallet_environments: WalletTestFramework) -> None:
     with wallet_environments.new_puzzle_hashes_allowed():
         tx = (
             await client_1.cat_spend(
-                env_1.dealias_wallet_id("crcat"),
-                wallet_environments.tx_config,
-                uint64(20),
-                wallet_1_addr,
-                uint64(0),
-                cat_discrepancy=(-50, Program.to(None), Program.to(None)),
+                CATSpend(
+                    wallet_id=env_1.dealias_wallet_id("crcat"),
+                    amount=uint64(20),
+                    inner_address=wallet_1_addr,
+                    fee=uint64(0),
+                    extra_delta=str(-50),
+                    tail_reveal=b"\x80",
+                    tail_solution=b"\x80",
+                    push=True,
+                ),
+                tx_config=wallet_environments.tx_config,
             )
         ).transaction
     [tx] = await wallet_node_1.wallet_state_manager.add_pending_transactions([tx])
@@ -596,7 +639,7 @@ async def test_vc_lifecycle(wallet_environments: WalletTestFramework) -> None:
             ),
         ]
     )
-    vc_record_updated = (await client_1.vc_get(VCGet(vc_record_updated.vc.launcher_id))).vc_record
+    vc_record_updated = (await client_1.vc_get(VCGet(vc_id=vc_record_updated.vc.launcher_id))).vc_record
     assert vc_record_updated is not None
 
     # Revoke VC
@@ -660,6 +703,7 @@ async def test_vc_lifecycle(wallet_environments: WalletTestFramework) -> None:
     ],
     indirect=True,
 )
+@pytest.mark.limit_consensus_modes(allowed=[ConsensusMode.HARD_FORK_2_0])
 @pytest.mark.anyio
 async def test_self_revoke(wallet_environments: WalletTestFramework) -> None:
     # Setup
@@ -680,13 +724,16 @@ async def test_self_revoke(wallet_environments: WalletTestFramework) -> None:
         did_wallet: DIDWallet = await DIDWallet.create_new_did_wallet(
             wallet_node_0.wallet_state_manager, wallet_0, uint64(1), action_scope
         )
+    await wallet_environments.full_node.wait_for_wallet_synced(wallet_node_0)
     did_id: bytes32 = bytes32.from_hexstr(did_wallet.get_my_DID())
 
+    async with wallet_0.wallet_state_manager.new_action_scope(DEFAULT_TX_CONFIG, push=True) as action_scope:
+        ph = await action_scope.get_puzzle_hash(wallet_0.wallet_state_manager)
     vc_record = (
         await client_0.vc_mint(
             VCMint(
                 did_id=encode_puzzle_hash(did_id, "did"),
-                target_address=encode_puzzle_hash(await wallet_0.get_new_puzzlehash(), "txch"),
+                target_address=encode_puzzle_hash(ph, "txch"),
                 fee=uint64(200),
                 push=True,
             ),
@@ -710,7 +757,7 @@ async def test_self_revoke(wallet_environments: WalletTestFramework) -> None:
             )
         ]
     )
-    new_vc_record: Optional[VCRecord] = (await client_0.vc_get(VCGet(vc_record.vc.launcher_id))).vc_record
+    new_vc_record: VCRecord | None = (await client_0.vc_get(VCGet(vc_id=vc_record.vc.launcher_id))).vc_record
     assert new_vc_record is not None
 
     # Test a negative case real quick (mostly unrelated)
@@ -720,7 +767,7 @@ async def test_self_revoke(wallet_environments: WalletTestFramework) -> None:
         ) as action_scope:
             await (await wallet_node_0.wallet_state_manager.get_or_create_vc_wallet()).generate_signed_transaction(
                 [uint64(1)],
-                [await wallet_0.get_puzzle_hash(new=not action_scope.config.tx_config.reuse_puzhash)],
+                [await action_scope.get_puzzle_hash(wallet_node_0.wallet_state_manager)],
                 action_scope,
                 vc_id=new_vc_record.vc.launcher_id,
                 new_proof_hash=bytes32.zeros,
@@ -731,7 +778,7 @@ async def test_self_revoke(wallet_environments: WalletTestFramework) -> None:
     async with did_wallet.wallet_state_manager.new_action_scope(
         wallet_environments.tx_config, push=True
     ) as action_scope:
-        await did_wallet.transfer_did(bytes32.zeros, uint64(0), False, action_scope)
+        await did_wallet.transfer_did(bytes32.zeros, uint64(0), action_scope)
 
     await wallet_environments.process_pending_states(
         [
@@ -766,7 +813,7 @@ async def test_self_revoke(wallet_environments: WalletTestFramework) -> None:
             )
         ]
     )
-    vc_record_revoked: Optional[VCRecord] = (await client_0.vc_get(VCGet(vc_record.vc.launcher_id))).vc_record
+    vc_record_revoked: VCRecord | None = (await client_0.vc_get(VCGet(vc_id=vc_record.vc.launcher_id))).vc_record
     assert vc_record_revoked is None
     assert (
         len(await (await wallet_node_0.wallet_state_manager.get_or_create_vc_wallet()).store.get_unconfirmed_vcs()) == 0
@@ -777,6 +824,7 @@ async def test_self_revoke(wallet_environments: WalletTestFramework) -> None:
     "trusted",
     [True, False],
 )
+@pytest.mark.limit_consensus_modes(allowed=[ConsensusMode.HARD_FORK_2_0])
 @pytest.mark.anyio
 async def test_cat_wallet_conversion(
     self_hostname: str,
@@ -811,15 +859,15 @@ async def test_cat_wallet_conversion(
 
     # Key point of test: create a normal CAT wallet first, and see if it gets converted to CR-CAT wallet
     await CATWallet.get_or_create_wallet_for_cat(
-        wallet_node_0.wallet_state_manager, wallet_0, Program.to(None).get_tree_hash().hex()
+        wallet_node_0.wallet_state_manager, wallet_0, Program.NIL.get_tree_hash()
     )
 
     did_id = bytes32.zeros
-    await mint_cr_cat(num_blocks, wallet_0, wallet_node_0, client_0, full_node_api, [did_id])
+    await mint_cr_cat(num_blocks, wallet_0, wallet_node_0, client_0, full_node_api, DEFAULT_TX_CONFIG, [did_id])
     await full_node_api.farm_blocks_to_wallet(count=num_blocks, wallet=wallet_0)
     await full_node_api.wait_for_wallet_synced(wallet_node=wallet_node_0, timeout=20)
 
-    async def check_length(length: int, func: Callable[..., Awaitable[Any]], *args: Any) -> Optional[Literal[True]]:
+    async def check_length(length: int, func: Callable[..., Awaitable[Any]], *args: Any) -> Literal[True] | None:
         if len(await func(*args)) == length:
             return True
         return None  # pragma: no cover

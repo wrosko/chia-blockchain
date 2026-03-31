@@ -16,8 +16,8 @@ from chia._tests.environments.wallet import STANDARD_TX_ENDPOINT_ARGS, WalletSta
 from chia.cmds.cmd_helpers import NeedsCoinSelectionConfig, NeedsWalletRPC, WalletClientInfo
 from chia.cmds.coins import CombineCMD, ListCMD, SplitCMD
 from chia.cmds.param_types import CliAmount, cli_amount_none
-from chia.rpc.wallet_request_types import GetSyncStatusResponse
 from chia.wallet.cat_wallet.cat_wallet import CATWallet
+from chia.wallet.wallet_request_types import GetSyncStatusResponse
 
 ONE_TRILLION = 1_000_000_000_000
 
@@ -66,8 +66,8 @@ def test_list_parsing(id: ValueAndArgs, show_unconfirmed: ValueAndArgs, paginate
         {
             "num_environments": 1,
             "blocks_needed": [3],  # 6 coins to test pagination
-            "reuse_puzhash": True,  # irrelevent
-            "trusted": True,  # irrelevent
+            "reuse_puzhash": True,  # irrelevant
+            "trusted": True,  # irrelevant
         }
     ],
     indirect=True,
@@ -256,7 +256,7 @@ async def test_list(wallet_environments: WalletTestFramework, capsys: pytest.Cap
     assert base_command.rpc_info.client_info is not None
 
     async def not_synced() -> GetSyncStatusResponse:
-        return GetSyncStatusResponse(False, False)
+        return GetSyncStatusResponse(synced=False, syncing=False)
 
     base_command.rpc_info.client_info.client.get_sync_status = not_synced  # type: ignore[method-assign]
     await base_command.run()

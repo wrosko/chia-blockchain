@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from asyncio import Task, gather, sleep
 from collections.abc import Coroutine
-from typing import Any, Optional, TypeVar
+from typing import Any, TypeVar
 
 import pytest
 from chia_rs.sized_ints import uint8, uint32, uint64
@@ -17,8 +17,8 @@ from chia._tests.util.network_protocol_data import (
 )
 from chia.farmer.farmer_api import FarmerAPI
 from chia.protocols import farmer_protocol
+from chia.protocols.outbound_message import Message, NodeType
 from chia.protocols.protocol_message_types import ProtocolMessageTypes
-from chia.server.outbound_message import Message, NodeType
 from chia.util.hash import std_hash
 from chia.util.task_referencer import create_referenced_task
 
@@ -46,7 +46,7 @@ async def test_farmer_ignores_concurrent_duplicate_signage_points(
     assert ProtocolMessageTypes(response).name == "harvester_handshake"
 
     sp = farmer_protocol.NewSignagePoint(
-        std_hash(b"1"), std_hash(b"2"), std_hash(b"3"), uint64(1), uint64(1000000), uint8(2), uint32(1)
+        std_hash(b"1"), std_hash(b"2"), std_hash(b"3"), uint64(1), uint64(1000000), uint8(2), uint32(1), uint32(0)
     )
     await gather(
         farmer_api.new_signage_point(sp),
@@ -80,9 +80,7 @@ async def test_farmer_responds_with_signed_values(farmer_one_harvester: FarmerOn
     )
     setattr(farmer_api, "_process_respond_signatures", lambda res: signed_values)
 
-    signed_values_task: Task[Optional[Message]] = await begin_task(
-        farmer_api.request_signed_values(request_signed_values)
-    )
+    signed_values_task: Task[Message | None] = await begin_task(farmer_api.request_signed_values(request_signed_values))
 
     # Wait a bit for the dummy harvester to receive the signature request and respond with a dummy signature
     await sleep(1)

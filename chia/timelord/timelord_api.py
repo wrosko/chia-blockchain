@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, ClassVar, Optional, cast
+from typing import TYPE_CHECKING, ClassVar
 
 from chia_rs.sized_ints import uint64
 
@@ -19,9 +19,11 @@ log = logging.getLogger(__name__)
 
 class TimelordAPI:
     if TYPE_CHECKING:
-        from chia.server.api_protocol import ApiProtocol
+        from chia.apis.timelord_stub import TimelordApiStub
 
-        _protocol_check: ClassVar[ApiProtocol] = cast("TimelordAPI", None)
+        # Verify this class implements the TimelordApiStub protocol
+        def _protocol_check(self: TimelordAPI) -> TimelordApiStub:
+            return self
 
     log: logging.Logger
     timelord: Timelord
@@ -38,7 +40,7 @@ class TimelordAPI:
         self.timelord.state_changed_callback = callback
 
     @metadata.request()
-    async def new_peak_timelord(self, new_peak: timelord_protocol.NewPeakTimelord) -> None:
+    async def new_peak_timelord(self, new_peak: NewPeakTimelord) -> None:
         if self.timelord.last_state is None:
             return None
         async with self.timelord.lock:
@@ -63,6 +65,8 @@ class TimelordAPI:
                     "Not skipping peak, has equal weight but lower iterations,"
                     f"current peak:{self.timelord.last_state.total_iters} new peak "
                     f"{new_peak.reward_chain_block.total_iters}"
+                    f"current rh: {self.timelord.last_state.peak.reward_chain_block.get_hash()}"
+                    f"new peak rh: {new_peak.reward_chain_block.get_hash()}"
                 )
                 self.timelord.new_peak = new_peak
                 self.timelord.state_changed("new_peak", {"height": new_peak.reward_chain_block.height})
@@ -82,7 +86,7 @@ class TimelordAPI:
                 log.info(
                     "Not skipping peak, don't have. Maybe we are not the fastest timelord "
                     f"height: {new_peak.reward_chain_block.height} weight:"
-                    f"{new_peak.reward_chain_block.weight} "
+                    f"{new_peak.reward_chain_block.weight} rh {new_peak.reward_chain_block.get_hash()}"
                 )
                 self.timelord.new_peak = new_peak
                 self.timelord.state_changed("new_peak", {"height": new_peak.reward_chain_block.height})
@@ -99,13 +103,22 @@ class TimelordAPI:
             self.timelord.state_changed("skipping_peak", {"height": new_peak.reward_chain_block.height})
 
     def check_orphaned_unfinished_block(self, new_peak: NewPeakTimelord):
+        new_peak_unf_rh = new_peak.reward_chain_block.get_unfinished().get_hash()
         for unf_block in self.timelord.unfinished_blocks:
             if unf_block.reward_chain_block.total_iters <= new_peak.reward_chain_block.total_iters:
+                if unf_block.reward_chain_block.get_hash() == new_peak_unf_rh:
+                    log.debug("unfinished block is the same as the new peak")
+                    continue
                 # there is an unfinished block that would be orphaned by this peak
+                log.info(f"this peak would orphan unfinished block {unf_block.reward_chain_block.get_hash()}")
                 return True
         for unf_block in self.timelord.overflow_blocks:
             if unf_block.reward_chain_block.total_iters <= new_peak.reward_chain_block.total_iters:
+                if unf_block.reward_chain_block.get_hash() == new_peak_unf_rh:
+                    log.debug("overflow unfinished block is the same as the new peak")
+                    continue
                 # there is an unfinished block (overflow) that would be orphaned by this peak
+                log.info(f"this peak would orphan unfinished overflow block {unf_block.reward_chain_block.get_hash()}")
                 return True
         return False
 
@@ -123,6 +136,7 @@ class TimelordAPI:
                     self.timelord.last_state.get_sub_slot_iters(),
                     self.timelord.last_state.get_difficulty(),
                     self.timelord.get_height(),
+                    self.timelord.last_state.get_last_tx_height(),
                 )
             except Exception:
                 return None
@@ -131,7 +145,7 @@ class TimelordAPI:
                 self.timelord.overflow_blocks.append(new_unfinished_block)
                 log.debug(f"Overflow unfinished block, total {self.timelord.total_unfinished}")
             elif ip_iters > last_ip_iters:
-                new_block_iters: Optional[uint64] = self.timelord._can_infuse_unfinished_block(new_unfinished_block)
+                new_block_iters: uint64 | None = self.timelord._can_infuse_unfinished_block(new_unfinished_block)
                 if new_block_iters:
                     self.timelord.unfinished_blocks.append(new_unfinished_block)
                     for chain in [Chain.REWARD_CHAIN, Chain.CHALLENGE_CHAIN]:

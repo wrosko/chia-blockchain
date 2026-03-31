@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional, Union
+from typing import Any
 
 from chia_puzzles_py.programs import (
     AUGMENTED_CONDITION as AUGMENTED_CONDITION_BYTES,
@@ -16,16 +16,17 @@ from chia_puzzles_py.programs import (
     P2_PUZZLE_HASH,
     P2_PUZZLE_HASH_HASH,
 )
+from chia_rs import CoinSpend
 from chia_rs.sized_bytes import bytes32
 from chia_rs.sized_ints import uint64
 
+from chia.consensus.condition_tools import conditions_for_solution
 from chia.consensus.default_constants import DEFAULT_CONSTANTS
 from chia.types.blockchain_format.coin import Coin
 from chia.types.blockchain_format.program import Program
 from chia.types.blockchain_format.serialized_program import SerializedProgram
-from chia.types.coin_spend import CoinSpend, make_spend
+from chia.types.coin_spend import make_spend
 from chia.types.condition_opcodes import ConditionOpcode
-from chia.util.condition_tools import conditions_for_solution
 from chia.util.streamable import VersionedBlob
 from chia.wallet.puzzles.clawback.metadata import ClawbackMetadata
 from chia.wallet.puzzles.p2_delegated_puzzle_or_hidden_puzzle import MOD
@@ -42,7 +43,7 @@ AUGMENTED_CONDITION_HASH = bytes32(AUGMENTED_CONDITION_HASH_BYTES)
 log = logging.getLogger(__name__)
 
 
-def create_augmented_cond_puzzle(condition: list[Union[int, uint64]], puzzle: Program) -> Program:
+def create_augmented_cond_puzzle(condition: list[int | uint64], puzzle: Program) -> Program:
     return AUGMENTED_CONDITION.curry(condition, puzzle)
 
 
@@ -136,23 +137,23 @@ def create_merkle_solution(
 
 def match_clawback_puzzle(
     uncurried: UncurriedPuzzle,
-    inner_puzzle: Union[Program, SerializedProgram],
-    inner_solution: Union[Program, SerializedProgram],
-) -> Optional[ClawbackMetadata]:
+    inner_puzzle: Program | SerializedProgram,
+    inner_solution: Program | SerializedProgram,
+) -> ClawbackMetadata | None:
     # Check if the inner puzzle is a P2 puzzle
     if MOD != uncurried.mod:
         return None
     if not isinstance(inner_puzzle, SerializedProgram):
-        inner_puzzle = SerializedProgram.from_program(inner_puzzle)
+        inner_puzzle = inner_puzzle.to_serialized()
     if not isinstance(inner_solution, SerializedProgram):
-        inner_solution = SerializedProgram.from_program(inner_solution)
+        inner_solution = inner_solution.to_serialized()
     # Fetch Remark condition
     conditions = conditions_for_solution(
         inner_puzzle,
         inner_solution,
         DEFAULT_CONSTANTS.MAX_BLOCK_COST_CLVM // 8,
     )
-    metadata: Optional[ClawbackMetadata] = None
+    metadata: ClawbackMetadata | None = None
     new_puzhash: set[bytes32] = set()
     if conditions is not None:
         for condition in conditions:

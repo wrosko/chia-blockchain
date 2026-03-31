@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-from typing import Optional
-
+from chia_rs import FullBlock
 from chia_rs.sized_ints import uint32
 
+from chia.consensus.augmented_chain import AugmentedBlockchain
 from chia.consensus.block_body_validation import ForkInfo
 from chia.consensus.difficulty_adjustment import get_next_sub_slot_iters_and_difficulty
 from chia.full_node.full_node import FullNode, PeakPostProcessingResult
-from chia.types.full_block import FullBlock
 from chia.types.peer_info import PeerInfo
 from chia.types.validation_state import ValidationState
-from chia.util.augmented_chain import AugmentedBlockchain
 from chia.util.batches import to_batches
 
 
@@ -47,7 +45,7 @@ async def add_blocks_in_batches(
         )
         assert success is True
         if state_change_summary is not None:
-            peak_fb: Optional[FullBlock] = await full_node.blockchain.get_full_peak()
+            peak_fb: FullBlock | None = await full_node.blockchain.get_full_peak()
             assert peak_fb is not None
             ppp_result: PeakPostProcessingResult = await full_node.peak_post_processing(
                 peak_fb, state_change_summary, None

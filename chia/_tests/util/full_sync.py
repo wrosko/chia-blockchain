@@ -5,31 +5,31 @@ import logging
 import shutil
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Optional, cast
+from typing import cast
 
 import aiosqlite
 import zstd
+from chia_rs import FullBlock
 from chia_rs.sized_bytes import bytes32
 from chia_rs.sized_ints import uint16
 
 from chia._tests.util.constants import test_constants as TEST_CONSTANTS
 from chia.cmds.init_funcs import chia_init
+from chia.consensus.augmented_chain import AugmentedBlockchain
 from chia.consensus.block_body_validation import ForkInfo
 from chia.consensus.constants import replace_str_to_bytes
 from chia.consensus.default_constants import DEFAULT_CONSTANTS
 from chia.consensus.difficulty_adjustment import get_next_sub_slot_iters_and_difficulty
 from chia.full_node.full_node import FullNode
-from chia.server.outbound_message import Message, NodeType
+from chia.protocols.outbound_message import Message, NodeType
 from chia.server.server import ChiaServer
 from chia.server.ws_connection import ConnectionCallback, WSChiaConnection
 from chia.simulator.block_tools import make_unfinished_block
-from chia.types.full_block import FullBlock
 from chia.types.peer_info import PeerInfo
 from chia.types.validation_state import ValidationState
-from chia.util.augmented_chain import AugmentedBlockchain
 from chia.util.config import load_config
 
 
@@ -60,9 +60,7 @@ def enable_profiler(profile: bool, counter: int) -> Iterator[None]:
 
 
 class FakeServer:
-    async def send_to_all(
-        self, messages: list[Message], node_type: NodeType, exclude: Optional[bytes32] = None
-    ) -> None:
+    async def send_to_all(self, messages: list[Message], node_type: NodeType, exclude: bytes32 | None = None) -> None:
         pass
 
     async def send_to_all_if(
@@ -70,18 +68,18 @@ class FakeServer:
         messages: list[Message],
         node_type: NodeType,
         predicate: Callable[[WSChiaConnection], bool],
-        exclude: Optional[bytes32] = None,
+        exclude: bytes32 | None = None,
     ) -> None:
         pass
 
     def set_received_message_callback(self, callback: ConnectionCallback) -> None:
         pass
 
-    async def get_peer_info(self) -> Optional[PeerInfo]:
+    async def get_peer_info(self) -> PeerInfo | None:
         return None
 
     def get_connections(
-        self, node_type: Optional[NodeType] = None, *, outbound: Optional[bool] = False
+        self, node_type: NodeType | None = None, *, outbound: bool | None = False
     ) -> list[WSChiaConnection]:
         return []
 
@@ -91,7 +89,7 @@ class FakeServer:
     async def start_client(
         self,
         target_node: PeerInfo,
-        on_connect: Optional[ConnectionCallback] = None,
+        on_connect: ConnectionCallback | None = None,
         auth: bool = False,
         is_feeler: bool = False,
     ) -> bool:
@@ -105,7 +103,7 @@ class FakePeer:
     def __init__(self) -> None:
         self.peer_node_id = bytes([0] * 32)
 
-    async def get_peer_info(self) -> Optional[PeerInfo]:
+    async def get_peer_info(self) -> PeerInfo | None:
         return None
 
 
@@ -118,7 +116,7 @@ async def run_sync_test(
     keep_up: bool,
     db_sync: str,
     node_profiler: bool,
-    start_at_checkpoint: Optional[str],
+    start_at_checkpoint: str | None,
 ) -> None:
     logger = logging.getLogger()
     logger.setLevel(logging.WARNING)

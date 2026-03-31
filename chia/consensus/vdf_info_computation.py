@@ -1,22 +1,18 @@
 from __future__ import annotations
 
-from typing import Optional
-
-from chia_rs import ConsensusConstants
+from chia_rs import BlockRecord, ConsensusConstants, EndOfSubSlotBundle
 from chia_rs.sized_bytes import bytes32
 from chia_rs.sized_ints import uint64, uint128
 
-from chia.consensus.block_record import BlockRecord
 from chia.consensus.blockchain_interface import BlockRecordsProtocol
 from chia.types.blockchain_format.classgroup import ClassgroupElement
-from chia.types.end_of_slot_bundle import EndOfSubSlotBundle
 
 
 def get_signage_point_vdf_info(
     constants: ConsensusConstants,
     finished_sub_slots: list[EndOfSubSlotBundle],
     overflow: bool,
-    prev_b: Optional[BlockRecord],
+    prev_b: BlockRecord | None,
     blocks: BlockRecordsProtocol,
     sp_total_iters: uint128,
     sp_iters: uint64,
@@ -92,7 +88,7 @@ def get_signage_point_vdf_info(
             )
         else:
             found_sub_slots = []
-        sp_pre_sb: Optional[BlockRecord] = None
+        sp_pre_sb: BlockRecord | None = None
         while len(found_sub_slots) < 2 and curr.height > 0:
             if sp_pre_sb is None and curr.total_iters < sp_total_iters:
                 sp_pre_sb = curr

@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 import itertools
-from typing import Optional
 
 import pytest
-from chia_rs import G2Element
+from chia_rs import CoinSpend, G2Element
 from chia_rs.sized_bytes import bytes32
 from chia_rs.sized_ints import uint32, uint64
 
 from chia._tests.util.spend_sim import CostLogger, sim_and_client
 from chia.types.blockchain_format.coin import Coin
-from chia.types.blockchain_format.program import Program
-from chia.types.coin_spend import CoinSpend, make_spend
+from chia.types.blockchain_format.program import Program, run
+from chia.types.coin_spend import make_spend
 from chia.types.mempool_inclusion_status import MempoolInclusionStatus
 from chia.util.errors import Err
 from chia.util.hash import std_hash
@@ -105,7 +104,7 @@ async def test_covenant_layer(cost_logger: CostLogger) -> None:
         ].coin
 
         # With the honest coin, attempt to spend the non-eve case too soon
-        result: tuple[MempoolInclusionStatus, Optional[Err]] = await client.push_tx(
+        result: tuple[MempoolInclusionStatus, Err | None] = await client.push_tx(
             WalletSpendBundle(
                 [
                     make_spend(
@@ -117,7 +116,7 @@ async def test_covenant_layer(cost_logger: CostLogger) -> None:
                                 inner_puzzle_hash=ACS_PH,
                                 amount=uint64(acs_coin.amount),
                             ),
-                            Program.to(None),
+                            Program.NIL,
                             Program.to([[51, covenant_puzzle_hash, acs_coin.amount]]),
                         ),
                     ),
@@ -139,7 +138,7 @@ async def test_covenant_layer(cost_logger: CostLogger) -> None:
                                 covenant_puzzle,
                                 solve_covenant_layer(
                                     LineageProof(parent_name=parent.parent_coin_info, amount=uint64(parent.amount)),
-                                    Program.to(None),
+                                    Program.NIL,
                                     Program.to([[51, covenant_puzzle_hash, cov.amount]]),
                                 ),
                             ),
@@ -173,7 +172,7 @@ async def test_covenant_layer(cost_logger: CostLogger) -> None:
                                     inner_puzzle_hash=ACS_PH,
                                     amount=uint64(acs_cov.amount),
                                 ),
-                                Program.to(None),
+                                Program.NIL,
                                 Program.to([[51, covenant_puzzle_hash, new_acs_cov.amount]]),
                             ),
                         ),
@@ -213,7 +212,7 @@ async def test_did_tp(cost_logger: CostLogger) -> None:
         bad_data: bytes32 = bytes32.zeros
 
         # Try to update metadata and tp without any announcement
-        result: tuple[MempoolInclusionStatus, Optional[Err]] = await client.push_tx(
+        result: tuple[MempoolInclusionStatus, Err | None] = await client.push_tx(
             WalletSpendBundle(
                 [
                     make_spend(
@@ -301,10 +300,10 @@ async def test_did_tp(cost_logger: CostLogger) -> None:
 
         remark_condition: Program = next(
             condition
-            for condition in successful_spend.coin_spends[0]
-            .puzzle_reveal.to_program()
-            .run(successful_spend.coin_spends[0].solution.to_program())
-            .as_iter()
+            for condition in run(
+                successful_spend.coin_spends[0].puzzle_reveal,
+                Program.from_serialized(successful_spend.coin_spends[0].solution),
+            ).as_iter()
             if condition.first() == Program.to(1)
         )
         assert remark_condition == Program.to([1, (MOCK_LAUNCHER_ID, new_metadata), new_tp_hash])
@@ -327,7 +326,7 @@ async def test_revocation_layer(cost_logger: CostLogger) -> None:
         )[0].coin
 
         # Reveal the wrong puzzle
-        result: tuple[MempoolInclusionStatus, Optional[Err]] = await client.push_tx(
+        result: tuple[MempoolInclusionStatus, Err | None] = await client.push_tx(
             WalletSpendBundle(
                 [
                     make_spend(
@@ -335,7 +334,7 @@ async def test_revocation_layer(cost_logger: CostLogger) -> None:
                         p2_either_puzzle,
                         solve_revocation_layer(
                             ACS,
-                            Program.to(None),
+                            Program.NIL,
                             hidden=True,
                         ),
                     )
@@ -399,7 +398,7 @@ async def test_revocation_layer(cost_logger: CostLogger) -> None:
 @pytest.mark.parametrize("num_proofs", range(1, 6))
 async def test_proofs_checker(cost_logger: CostLogger, num_proofs: int) -> None:
     async with sim_and_client() as (sim, client):
-        flags: list[str] = [str(i) for i in range(0, num_proofs)]
+        flags: list[str] = [str(i) for i in range(num_proofs)]
         proofs_checker: ProofsChecker = ProofsChecker(flags)
 
         # (mod (PROOFS_CHECKER proofs) (if (a PROOFS_CHECKER (list proofs)) () (x)))
@@ -415,7 +414,7 @@ async def test_proofs_checker(cost_logger: CostLogger, num_proofs: int) -> None:
 
         block_height: uint32 = sim.block_height
         for i, proof_list in enumerate(itertools.permutations(flags, num_proofs)):
-            result: tuple[MempoolInclusionStatus, Optional[Err]] = await client.push_tx(
+            result: tuple[MempoolInclusionStatus, Err | None] = await client.push_tx(
                 cost_logger.add_cost(
                     f"Proofs Checker only - num_proofs: {num_proofs} - permutation: {i}",
                     WalletSpendBundle(
@@ -506,7 +505,7 @@ async def test_vc_lifecycle(test_syncing: bool, cost_logger: CostLogger) -> None
             ACS_PH,
             [bytes32.zeros],
         )
-        result: tuple[MempoolInclusionStatus, Optional[Err]] = await client.push_tx(
+        result: tuple[MempoolInclusionStatus, Err | None] = await client.push_tx(
             cost_logger.add_cost(
                 "Launch VC",
                 WalletSpendBundle(
@@ -616,16 +615,16 @@ async def test_vc_lifecycle(test_syncing: bool, cost_logger: CostLogger) -> None
             dpuz_1, launch_crcat_spend_1, cr_1 = CRCAT.launch(
                 cr_coin_1,
                 CreateCoin(ACS_PH, uint64(cr_coin_1.amount)),
-                Program.to(None),
-                Program.to(None),
+                Program.NIL,
+                Program.NIL,
                 AUTHORIZED_PROVIDERS,
                 proofs_checker.as_program(),
             )
             dpuz_2, launch_crcat_spend_2, cr_2 = CRCAT.launch(
                 cr_coin_2,
                 CreateCoin(ACS_PH, uint64(cr_coin_2.amount)),
-                Program.to(None),
-                Program.to(None),
+                Program.NIL,
+                Program.NIL,
                 AUTHORIZED_PROVIDERS,
                 proofs_checker.as_program(),
             )
@@ -700,7 +699,7 @@ async def test_vc_lifecycle(test_syncing: bool, cost_logger: CostLogger) -> None
                     ),
                 ],
                 NEW_PROOFS if error != "use_malicious_cats" else MALICIOUS_PROOFS,
-                Program.to(None),
+                Program.NIL,
                 launcher_id,
                 vc.launcher_id,
                 vc.wrap_inner_with_backdoor().get_tree_hash(),

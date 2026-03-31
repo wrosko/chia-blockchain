@@ -44,23 +44,24 @@ jobs:
 
   build:
     name: Build EXE
-    runs-on: [windows-2019]
+    runs-on: [windows-2022]
     needs:
       - version
     timeout-minutes: 65
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10"]
+        python-version: ["3.12"]
 
     env:
       CHIA_INSTALLER_VERSION: ${{ needs.version.outputs.chia-installer-version }}
+      CHIA_SEMVER_VERSION: ${{ needs.version.outputs.chia-semver-version }}
       POETRY_DYNAMIC_VERSIONING_OVERRIDE: "chia-blockchain=${{ needs.version.outputs.chia-installer-version }}"
       TAG_TYPE: ${{ needs.version.outputs.tag-type }}
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           submodules: recursive
@@ -79,7 +80,7 @@ jobs:
           echo "dir=$(npm config get cache)" >> "$GITHUB_OUTPUT"
 
       - name: Cache npm
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ steps.npm-cache.outputs.dir }}
           key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
@@ -95,10 +96,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Setup Node 18.x
-        uses: actions/setup-node@v4
+      - name: Setup Node per .nvmrc in GUI
+        uses: actions/setup-node@v6
         with:
-          node-version: "18.x"
+          node-version-file: chia-blockchain-gui/.nvmrc
 
       - name: Test for secrets access
         id: check_secrets
@@ -209,7 +210,7 @@ jobs:
           rm -rf ./chia-blockchain-gui
 
       - name: Cache GUI
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         id: cache-gui
         with:
           path: .\chia-blockchain-gui
@@ -228,13 +229,13 @@ jobs:
         env:
           HAS_SIGNING_SECRET: ${{ steps.check_secrets.outputs.HAS_SIGNING_SECRET }}
         run: |
-          $env:path="C:\Program` Files` (x86)\Microsoft` Visual` Studio\2019\Enterprise\SDK\ScopeCppSDK\vc15\VC\bin\;$env:path"
+          $env:path="C:\Program` Files\Microsoft` Visual` Studio\2022\Enterprise\SDK\ScopeCppSDK\vc15\VC\bin\;$env:path"
           $env:path="C:\Program` Files` (x86)\Windows` Kits\10\App` Certification` Kit;$env:path"
           cd .\build_scripts
           .\build_windows-2-installer.ps1
 
       - name: Upload Installer to artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: chia-installers-windows-exe-intel
           path: chia-blockchain-gui\release-builds\windows-installer\
@@ -263,7 +264,7 @@ jobs:
       fail-fast: false
       matrix:
         configuration:
-          - python-version: ["3.10"]
+          - python-version: ["3.12"]
             os:
               - matrix: windows
                 file-type:
@@ -317,14 +318,14 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - name: 2019
-            matrix: 2019
-            runs-on:
-              intel: windows-2019
           - name: 2022
             matrix: 2022
             runs-on:
               intel: windows-2022
+          - name: 2025
+            matrix: 2025
+            runs-on:
+              intel: windows-2025
         arch:
           - name: Intel
             matrix: intel
@@ -336,7 +337,7 @@ jobs:
       - uses: Chia-Network/actions/clean-workspace@main
 
       - name: Download packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: chia-installers-windows-exe-intel
           path: packages

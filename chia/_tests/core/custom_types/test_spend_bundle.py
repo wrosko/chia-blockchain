@@ -4,22 +4,21 @@ import random
 import unittest
 
 import pytest
-from chia_rs import G2Element
+from chia_rs import CoinSpend, G2Element, SpendBundle
 from chia_rs.sized_bytes import bytes32
 from chia_rs.sized_ints import uint64
 
 from chia.types.blockchain_format.coin import Coin
 from chia.types.blockchain_format.program import Program
-from chia.types.coin_spend import CoinSpend, make_spend
+from chia.types.coin_spend import make_spend
 from chia.types.condition_opcodes import ConditionOpcode
-from chia.types.spend_bundle import SpendBundle
 
 BLANK_SPEND_BUNDLE = SpendBundle(coin_spends=[], aggregated_signature=G2Element())
 NULL_SIGNATURE = "0xc" + "0" * 191
 
 
 class TestStructStream(unittest.TestCase):
-    def test_round_trip(self):
+    def test_round_trip(self) -> None:
         spend_bundle = BLANK_SPEND_BUNDLE
         json_dict = spend_bundle.to_json_dict()
 
@@ -29,10 +28,7 @@ class TestStructStream(unittest.TestCase):
 
 
 def rand_hash(rng: random.Random) -> bytes32:
-    ret = bytearray(32)
-    for i in range(32):
-        ret[i] = rng.getrandbits(8)
-    return bytes32(ret)
+    return bytes32.random(r=rng)
 
 
 def create_spends(num: int) -> tuple[list[CoinSpend], list[Coin]]:

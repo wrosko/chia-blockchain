@@ -44,11 +44,11 @@ def test_compute_spend_hints_and_additions() -> None:
 
     with pytest.raises(ValidationError):
         compute_spend_hints_and_additions(
-            make_spend(parent_coin.coin, Program.to(1), Program.to([[51, bytes32.zeros, 0] for _ in range(0, 10000)]))
+            make_spend(parent_coin.coin, Program.to(1), Program.to([[51, bytes32.zeros, 0] for _ in range(10000)]))
         )
     with pytest.raises(ValidationError):
         compute_spend_hints_and_additions(
-            make_spend(parent_coin.coin, Program.to(1), Program.to([[50, bytes48.zeros, b""] for _ in range(0, 10000)]))
+            make_spend(parent_coin.coin, Program.to(1), Program.to([[50, bytes48.zeros, b""] for _ in range(10000)]))
         )
 
 
@@ -106,7 +106,7 @@ def test_list_to_binary_tree() -> None:
 @pytest.mark.parametrize(
     "serializations",
     [
-        (tuple(), Program.to(None), []),
+        (tuple(), Program.NIL, []),
         ((bytes32.zeros,), Program.to([bytes32.zeros]), [LineageProofField.PARENT_NAME]),
         (
             (bytes32.zeros, bytes32.zeros),
@@ -129,7 +129,7 @@ def test_lineage_proof_varargs(serializations: tuple[tuple[Any, ...], Program, l
 @pytest.mark.parametrize(
     "serializations",
     [
-        ({}, Program.to(None), []),
+        ({}, Program.NIL, []),
         ({"parent_name": bytes32.zeros}, Program.to([bytes32.zeros]), [LineageProofField.PARENT_NAME]),
         (
             {"parent_name": bytes32.zeros, "inner_puzzle_hash": bytes32.zeros},

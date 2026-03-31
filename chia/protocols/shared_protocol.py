@@ -2,21 +2,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Optional
 
 from chia_rs.sized_ints import int16, uint8, uint16
 
-from chia.server.outbound_message import NodeType
+from chia.protocols.outbound_message import NodeType
 from chia.util.streamable import Streamable, streamable
 
 protocol_version = {
     NodeType.FULL_NODE: "0.0.36",
-    NodeType.HARVESTER: "0.0.36",
-    NodeType.FARMER: "0.0.36",
+    NodeType.HARVESTER: "0.0.37",
+    NodeType.FARMER: "0.0.37",
     NodeType.TIMELORD: "0.0.36",
     NodeType.INTRODUCER: "0.0.36",
     NodeType.WALLET: "0.0.38",
     NodeType.DATA_LAYER: "0.0.36",
+    NodeType.SOLVER: "0.0.37",
 }
 
 """
@@ -45,6 +45,9 @@ class Capability(IntEnum):
     # This is between a full node and receiving wallet
     MEMPOOL_UPDATES = 5
 
+    # Signals support for Hard Fork 2
+    HARD_FORK_2 = 6
+
 
 # These are the default capabilities used in all outgoing handshakes.
 # "1" means the capability is supported and enabled.
@@ -65,6 +68,7 @@ default_capabilities = {
     NodeType.INTRODUCER: _capabilities,
     NodeType.WALLET: _capabilities,
     NodeType.DATA_LAYER: _capabilities,
+    NodeType.SOLVER: _capabilities,
 }
 
 
@@ -84,4 +88,4 @@ class Handshake(Streamable):
 class Error(Streamable):
     code: int16  # Err
     message: str
-    data: Optional[bytes] = None
+    data: bytes | None = None

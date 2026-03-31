@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from chia_puzzles_py.programs import CHIALISP_DESERIALISATION, ROM_BOOTSTRAP_GENERATOR
+from chia_rs import SpendConditions
 from chia_rs.sized_bytes import bytes32
 from chia_rs.sized_ints import uint32
 from clvm.CLVMObject import CLVMStorage
@@ -10,10 +11,9 @@ from clvm_tools.clvmc import compile_clvm_text
 from chia._tests.util.get_name_puzzle_conditions import get_name_puzzle_conditions
 from chia.consensus.condition_costs import ConditionCost
 from chia.consensus.default_constants import DEFAULT_CONSTANTS
-from chia.types.blockchain_format.program import Program
+from chia.types.blockchain_format.program import Program, run_with_cost
 from chia.types.blockchain_format.serialized_program import SerializedProgram
 from chia.types.generator_types import BlockGenerator
-from chia.types.spend_bundle_conditions import SpendConditions
 
 DESERIALIZE_MOD = Program.from_bytes(CHIALISP_DESERIALISATION)
 
@@ -77,7 +77,7 @@ EXPECTED_OUTPUT = (
 def run_generator(self: BlockGenerator) -> tuple[int, Program]:
     """This mode is meant for accepting possibly soft-forked transactions into the mempool"""
     args = Program.to([self.generator_refs])
-    return GENERATOR_MOD.run_with_cost(MAX_COST, [self.program, args])
+    return run_with_cost(GENERATOR_MOD, MAX_COST, [self.program, args])
 
 
 def as_atom_list(prg: CLVMStorage) -> list[bytes]:
@@ -110,7 +110,7 @@ class TestROM:
 
         args = Program.to([DESERIALIZE_MOD, [FIRST_GENERATOR, SECOND_GENERATOR]])
         sp = to_sp(COMPILED_GENERATOR_CODE)
-        cost, r = sp.run_with_cost(MAX_COST, args)
+        cost, r = run_with_cost(sp, MAX_COST, args)
         assert cost == EXPECTED_ABBREVIATED_COST
         assert r.as_bin().hex() == EXPECTED_OUTPUT
 
@@ -146,7 +146,7 @@ class TestROM:
             before_seconds_relative=None,
             birth_height=None,
             birth_seconds=None,
-            create_coin=[(bytes([0] * 31 + [1]), 500, None)],
+            create_coin=[(bytes32([0] * 31 + [1]), 500, None)],
             agg_sig_me=[],
             agg_sig_parent=[],
             agg_sig_puzzle=[],
@@ -155,6 +155,11 @@ class TestROM:
             agg_sig_parent_amount=[],
             agg_sig_parent_puzzle=[],
             flags=0,
+            # in run_block_generator() we don't have access to separate
+            # execution cost, just in run_block_generator2()
+            execution_cost=0 if softfork_height < DEFAULT_CONSTANTS.HARD_FORK_HEIGHT else 44,
+            condition_cost=1800000,
+            fingerprint=b"",
         )
 
         assert npc_result.conds.spends == [spend]

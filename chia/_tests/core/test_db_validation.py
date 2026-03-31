@@ -1,33 +1,29 @@
 from __future__ import annotations
 
-import random
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 import pytest
+from chia_rs import ConsensusConstants, FullBlock
 from chia_rs.sized_bytes import bytes32
 from chia_rs.sized_ints import uint32, uint64
 
 from chia._tests.util.temp_file import TempFile
 from chia.cmds.db_validate_func import validate_v2
 from chia.consensus.block_body_validation import ForkInfo
+from chia.consensus.block_height_map import BlockHeightMap
 from chia.consensus.blockchain import Blockchain
 from chia.consensus.default_constants import DEFAULT_CONSTANTS
 from chia.consensus.multiprocess_validation import PreValidationResult
 from chia.full_node.block_store import BlockStore
 from chia.full_node.coin_store import CoinStore
-from chia.simulator.block_tools import test_constants
-from chia.types.full_block import FullBlock
 from chia.util.db_wrapper import DBWrapper2
 
 
 def rand_hash() -> bytes32:
-    ret = bytearray(32)
-    for i in range(32):
-        ret[i] = random.getrandbits(8)
-    return bytes32(ret)
+    return bytes32.random()
 
 
 def make_version(conn: sqlite3.Connection, version: int) -> None:
@@ -116,7 +112,7 @@ def test_db_validate_in_main_chain(invalid_in_chain: bool, default_config: dict[
             make_block_table(conn)
 
             prev = bytes32(DEFAULT_CONSTANTS.AGG_SIG_ME_ADDITIONAL_DATA)
-            for height in range(0, 100):
+            for height in range(100):
                 header_hash = rand_hash()
                 add_block(conn, header_hash, prev, height, True)
                 if height % 4 == 0:
@@ -134,7 +130,7 @@ def test_db_validate_in_main_chain(invalid_in_chain: bool, default_config: dict[
             validate_v2(db_file, config=default_config, validate_blocks=False)
 
 
-async def make_db(db_file: Path, blocks: list[FullBlock]) -> None:
+async def make_db(db_file: Path, blocks: list[FullBlock], constants: ConsensusConstants) -> None:
     async with DBWrapper2.managed(database=db_file, reader_count=1, db_version=2) as db_wrapper:
         async with db_wrapper.writer_maybe_transaction() as conn:
             # this is done by chia init normally
@@ -143,9 +139,10 @@ async def make_db(db_file: Path, blocks: list[FullBlock]) -> None:
 
         block_store = await BlockStore.create(db_wrapper)
         coin_store = await CoinStore.create(db_wrapper)
+        height_map = await BlockHeightMap.create(Path("."), db_wrapper)
 
-        bc = await Blockchain.create(coin_store, block_store, test_constants, Path("."), reserved_cores=0)
-        sub_slot_iters = test_constants.SUB_SLOT_ITERS_STARTING
+        bc = await Blockchain.create(coin_store, block_store, height_map, constants, reserved_cores=0)
+        sub_slot_iters = constants.SUB_SLOT_ITERS_STARTING
         for block in blocks:
             if block.height != 0 and len(block.finished_sub_slots) > 0:
                 if block.finished_sub_slots[0].challenge_chain.new_sub_slot_iters is not None:
@@ -158,10 +155,12 @@ async def make_db(db_file: Path, blocks: list[FullBlock]) -> None:
 
 @pytest.mark.anyio
 async def test_db_validate_default_1000_blocks(
-    default_1000_blocks: list[FullBlock], default_config: dict[str, Any]
+    default_1000_blocks: list[FullBlock],
+    default_config: dict[str, Any],
+    blockchain_constants: ConsensusConstants,
 ) -> None:
     with TempFile() as db_file:
-        await make_db(db_file, default_1000_blocks)
+        await make_db(db_file, default_1000_blocks, blockchain_constants)
 
         # we expect everything to be valid except this is a test chain, so it
         # doesn't have the correct genesis challenge

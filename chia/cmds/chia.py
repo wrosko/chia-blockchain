@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from io import TextIOWrapper
-from typing import Optional
 
 import click
 
@@ -12,7 +11,7 @@ from chia.cmds.completion import completion
 from chia.cmds.configure import configure_cmd
 from chia.cmds.data import data_cmd
 from chia.cmds.db import db_cmd
-from chia.cmds.dev import dev_cmd
+from chia.cmds.dev.main import dev_cmd
 from chia.cmds.farm import farm_cmd
 from chia.cmds.init import init_cmd
 from chia.cmds.keys import keys_cmd
@@ -24,13 +23,14 @@ from chia.cmds.plots import plots_cmd
 from chia.cmds.plotters import plotters_cmd
 from chia.cmds.rpc import rpc_cmd
 from chia.cmds.show import show_cmd
+from chia.cmds.solver import solver_cmd
 from chia.cmds.start import start_cmd
 from chia.cmds.stop import stop_cmd
 from chia.cmds.wallet import wallet_cmd
+from chia.ssl.ssl_check import check_ssl
 from chia.util.default_root import DEFAULT_KEYS_ROOT_PATH, resolve_root_path
 from chia.util.errors import KeychainCurrentPassphraseIsInvalid
 from chia.util.keychain import Keychain, set_keys_root_path
-from chia.util.ssl_check import check_ssl
 
 CONTEXT_SETTINGS = {
     "help_option_names": ["-h", "--help"],
@@ -53,24 +53,24 @@ CONTEXT_SETTINGS = {
 @click.option(
     "--keys-root-path", default=DEFAULT_KEYS_ROOT_PATH, help="Keyring file root", type=click.Path(), show_default=True
 )
-@click.option("--passphrase-file", type=click.File("r"), help="File or descriptor to read the keyring passphrase from")
+@click.option("--passphrase-file", type=click.File("r"), help="File to read the keyring passphrase from")
 @click.pass_context
 def cli(
     ctx: click.Context,
     root_path: str,
-    keys_root_path: Optional[str] = None,
-    passphrase_file: Optional[TextIOWrapper] = None,
+    keys_root_path: str,
+    passphrase_file: TextIOWrapper | None = None,
 ) -> None:
     from pathlib import Path
 
     context = ChiaCliContext.set_default(ctx=ctx)
     context.root_path = Path(root_path)
+    context.keys_root_path = Path(keys_root_path)
 
-    # keys_root_path and passphrase_file will be None if the passphrase options have been
+    set_keys_root_path(Path(keys_root_path))
+
+    # passphrase_file will be None if the passphrase options have been
     # scrubbed from the CLI options
-    if keys_root_path is not None:
-        set_keys_root_path(Path(keys_root_path))
-
     if passphrase_file is not None:
         import sys
 
@@ -81,7 +81,7 @@ def cli(
             if Keychain.master_passphrase_is_valid(passphrase):
                 cache_passphrase(passphrase)
             else:
-                raise KeychainCurrentPassphraseIsInvalid()
+                raise KeychainCurrentPassphraseIsInvalid
         except KeychainCurrentPassphraseIsInvalid:
             if Path(passphrase_file.name).is_file():
                 print(f'Invalid passphrase found in "{passphrase_file.name}"')
@@ -127,6 +127,7 @@ cli.add_command(configure_cmd)
 cli.add_command(init_cmd)
 cli.add_command(rpc_cmd)
 cli.add_command(show_cmd)
+cli.add_command(solver_cmd)
 cli.add_command(start_cmd)
 cli.add_command(stop_cmd)
 cli.add_command(netspace_cmd)

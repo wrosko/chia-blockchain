@@ -7,8 +7,8 @@ import itertools
 import logging
 import random
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
 
 import anyio
 import pytest
@@ -119,8 +119,8 @@ class Request:
     # TODO: is the ID unneeded?
     id: str
     priority: MutexPriority
-    acquisition_order: Optional[int] = None
-    release_order: Optional[int] = None
+    acquisition_order: int | None = None
+    release_order: int | None = None
     order_counter: Callable[[], int] = counter.__next__
     # TODO: done may not be needed
     done: bool = False
@@ -128,7 +128,7 @@ class Request:
 
     def __lt__(self, other: Request) -> bool:
         if self.acquisition_order is None or other.acquisition_order is None:
-            raise RequestNotCompleteError()
+            raise RequestNotCompleteError
 
         return self.acquisition_order < other.acquisition_order
 
@@ -152,7 +152,7 @@ class Request:
 
     def before(self, other: Request) -> bool:
         if self.release_order is None or other.acquisition_order is None:
-            raise RequestNotCompleteError()
+            raise RequestNotCompleteError
 
         return self.release_order < other.acquisition_order
 
@@ -381,7 +381,7 @@ def sane(requests: list[Request]) -> bool:
         return False
 
     ordered = sorted(requests)
-    return all(a.before(b) for a, b in zip(ordered, ordered[1:]))
+    return all(a.before(b) for a, b in itertools.pairwise(ordered))
 
 
 @dataclass

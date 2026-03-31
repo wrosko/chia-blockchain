@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import logging
 import traceback
-from collections.abc import Awaitable
-from typing import TYPE_CHECKING, Any, Callable, get_type_hints
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any, get_type_hints
 
 import aiohttp
 
+from chia.rpc.rpc_errors import structured_error_from_exception
 from chia.util.json_util import obj_to_response
 from chia.util.streamable import Streamable
 from chia.wallet.util.blind_signer_tl import BLIND_SIGNER_TRANSLATION
@@ -66,11 +67,13 @@ def marshal(func: MarshallableRpcEndpoint) -> RpcEndpoint:
                 raise ValueError("Internal Error. Marshalled endpoint was made with clvm_streamable.")
             return response_dict
 
+    rpc_endpoint.__name__ = func.__name__
     return rpc_endpoint
 
 
 def wrap_http_handler(
     f: Callable[[dict[str, Any]], Awaitable[EndpointResult]],
+    route: str,
 ) -> Callable[[aiohttp.web.Request], Awaitable[aiohttp.web.StreamResponse]]:
     async def inner(request: aiohttp.web.Request) -> aiohttp.web.StreamResponse:
         request_data = await request.json()
@@ -82,11 +85,14 @@ def wrap_http_handler(
                 res_object["success"] = True
         except Exception as e:
             tb = traceback.format_exc()
-            log.warning(f"Error while handling message: {tb}")
-            if len(e.args) > 0:
-                res_object = {"success": False, "error": f"{e.args[0]}", "traceback": f"{tb}"}
-            else:
-                res_object = {"success": False, "error": f"{e}"}
+            log.warning(f"Error while handling message for {route}: {tb}")
+            error_message, structured = structured_error_from_exception(e)
+            res_object = {
+                "success": False,
+                "error": error_message,
+                "traceback": tb,
+                "structuredError": structured,
+            }
 
         return obj_to_response(res_object)
 

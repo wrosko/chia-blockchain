@@ -5,23 +5,22 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
-from typing import Optional
 
 import aiosqlite
 import click
 import zstd
+from chia_rs import FullBlock
 
 from chia._tests.util.full_sync import FakePeer, FakeServer, run_sync_test
 from chia.cmds.init_funcs import chia_init
+from chia.consensus.augmented_chain import AugmentedBlockchain
 from chia.consensus.block_body_validation import ForkInfo
 from chia.consensus.constants import replace_str_to_bytes
 from chia.consensus.default_constants import DEFAULT_CONSTANTS
 from chia.consensus.difficulty_adjustment import get_next_sub_slot_iters_and_difficulty
 from chia.full_node.full_node import FullNode
 from chia.server.ws_connection import WSChiaConnection
-from chia.types.full_block import FullBlock
 from chia.types.validation_state import ValidationState
-from chia.util.augmented_chain import AugmentedBlockchain
 from chia.util.config import load_config
 
 
@@ -73,7 +72,7 @@ def run(
     keep_up: bool,
     db_sync: str,
     node_profiler: bool,
-    start_at_checkpoint: Optional[str],
+    start_at_checkpoint: str | None,
 ) -> None:
     """
     The FILE parameter should point to an existing blockchain database file (in v2 format)
@@ -103,7 +102,9 @@ def analyze() -> None:
     for input_file in glob("slow-batch-*.profile"):
         output = input_file.replace(".profile", ".png")
         print(f"{input_file}")
-        check_call(f"gprof2dot -f pstats {quote(input_file)} | dot -T png >{quote(output)}", shell=True)
+        # TODO: would indeed be nice to not use shell=True, but this is
+        #       all local data and piping is verbose.  maybe still do it though.
+        check_call(f"gprof2dot -f pstats {quote(input_file)} | dot -T png >{quote(output)}", shell=True)  # noqa: S602
 
 
 @main.command("create-checkpoint", help="sync the full node up to specified height and save its state")

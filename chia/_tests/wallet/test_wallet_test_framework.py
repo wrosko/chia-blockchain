@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import pytest
+from chia_rs import BlockRecord
+from chia_rs.sized_bytes import bytes32
 
+from chia._tests.conftest import ConsensusMode
 from chia._tests.environments.wallet import (
     BalanceCheckingError,
     WalletEnvironment,
     WalletStateTransition,
     WalletTestFramework,
 )
-from chia.consensus.block_record import BlockRecord
 from chia.wallet.cat_wallet.cat_wallet import CATWallet
 
 
@@ -26,6 +28,7 @@ from chia.wallet.cat_wallet.cat_wallet import CATWallet
     ],
     indirect=True,
 )
+@pytest.mark.limit_consensus_modes(allowed=[ConsensusMode.HARD_FORK_2_0])
 @pytest.mark.anyio
 async def test_basic_functionality(wallet_environments: WalletTestFramework) -> None:
     env_0: WalletEnvironment = wallet_environments.environments[0]
@@ -61,6 +64,7 @@ async def test_basic_functionality(wallet_environments: WalletTestFramework) -> 
     ],
     indirect=True,
 )
+@pytest.mark.limit_consensus_modes(allowed=[ConsensusMode.HARD_FORK_2_0])
 @pytest.mark.anyio
 async def test_balance_checking(
     wallet_environments: WalletTestFramework,
@@ -145,7 +149,7 @@ async def test_balance_checking(
             )
         ]
     )
-    await CATWallet.get_or_create_wallet_for_cat(env_0.wallet_state_manager, env_0.xch_wallet, "00" * 32)
+    await CATWallet.get_or_create_wallet_for_cat(env_0.wallet_state_manager, env_0.xch_wallet, bytes32.zeros)
     with pytest.raises(KeyError, match="No wallet state for wallet id 2"):
         await env_0.check_balances()
 
