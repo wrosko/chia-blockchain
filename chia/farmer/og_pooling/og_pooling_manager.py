@@ -20,7 +20,7 @@ from chia.protocols.harvester_protocol import SignatureRequestSourceData, Signin
 from chia.server.ws_connection import WSChiaConnection
 from chia.types.blockchain_format.proof_of_space import generate_plot_public_key
 from chia_rs.sized_bytes import bytes32
-from chia_rs.sized_ints import uint8, uint64, uint128
+from chia_rs.sized_ints import uint8, uint64
 from chia.util.task_referencer import create_referenced_task
 
 DEFAULT_OG_POOL_URL: str = "https://farmer-chia-og.foxypool.io"
@@ -41,7 +41,7 @@ class OgPoolingManager:
 
     _logger: Logger = getLogger("og_pooling_manager")
     _iters_limit: uint64
-    _difficulty_constant_factor: uint128
+    _consensus_constants: ConsensusConstants
     _pool_url: str
     _pool_payout_address: str
     _pool_target_puzzle_hash: bytes32
@@ -67,7 +67,7 @@ class OgPoolingManager:
         pool_public_keys: List[G1Element],
     ):
         self._iters_limit = calculate_sp_interval_iters(consensus_constants, consensus_constants.POOL_SUB_SLOT_ITERS)
-        self._difficulty_constant_factor = consensus_constants.DIFFICULTY_CONSTANT_FACTOR
+        self._consensus_constants = consensus_constants
         self._pool_url = farmer_config.get("pool_url", DEFAULT_OG_POOL_URL)
         self.update_pool_payout_address(farmer_config=farmer_config, farmer_reward_target_address=farmer_reward_target_address)
         self._is_og_pooling_disabled = farmer_config.get("disable_og_pooling", False)
@@ -119,9 +119,9 @@ class OgPoolingManager:
         # Otherwise, send the proof of space to the pool
         # When we win a block, we also send the partial to the pool
         required_iters = calculate_iterations_quality(
-            self._difficulty_constant_factor,
+            self._consensus_constants,
             computed_quality_string,
-            new_proof_of_space.proof.size,
+            new_proof_of_space.proof.param(),
             self._pool_state.difficulty,
             new_proof_of_space.sp_hash,
         )
