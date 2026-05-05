@@ -478,6 +478,17 @@ class FarmerAPI:
 
                 return
 
+            pool_public_key = new_proof_of_space.proof.pool_public_key
+            if pool_public_key is not None and self.farmer.og_pooling_manager is not None and self.farmer.og_pooling_manager.is_pooling_enabled:
+                await self.farmer.og_pooling_manager.process_new_proof_of_space_for_og_pool(
+                    new_proof_of_space,
+                    peer,
+                    pool_public_key,
+                    computed_quality_string
+                )
+
+            return
+
     @metadata.request(peer_required=True)
     async def partial_proofs(self, partial_proof_data: PartialProofsData, peer: WSChiaConnection) -> None:
         """
@@ -650,10 +661,16 @@ class FarmerAPI:
 
             # The plot size in the call to calculate_prefix_bits is only used
             # to distinguish v1 and v2 plots. The value does not matter
+            og_difficulty = new_signage_point.difficulty
+            og_sub_slot_iters = new_signage_point.sub_slot_iters
+            if self.farmer.og_pooling_manager is not None and self.farmer.og_pooling_manager.is_pooling_enabled:
+                og_sub_slot_iters = self.farmer.constants.POOL_SUB_SLOT_ITERS
+                og_difficulty = self.farmer.og_pooling_manager.current_difficulty
+
             message1 = harvester_protocol.NewSignagePointHarvester(
                 new_signage_point.challenge_hash,
-                new_signage_point.difficulty,
-                new_signage_point.sub_slot_iters,
+                og_difficulty,
+                og_sub_slot_iters,
                 new_signage_point.signage_point_index,
                 new_signage_point.challenge_chain_sp,
                 pool_difficulties,
@@ -880,7 +897,7 @@ class FarmerAPI:
                             )
                             return None
 
-                        pool_target: PoolTarget | None = PoolTarget(self.farmer.pool_target, uint32(0))
+                        pool_target: PoolTarget | None = PoolTarget(self.farmer.pool_target_puzzle_hash, uint32(0))
                         assert pool_target is not None
                         pool_target_signature: G2Element | None = AugSchemeMPL.sign(
                             self.farmer.pool_sks_map[pool_pk], bytes(pool_target)

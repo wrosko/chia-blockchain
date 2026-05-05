@@ -19,6 +19,7 @@ from chia_rs.sized_bytes import bytes32
 from chia_rs.sized_ints import uint8, uint16, uint32, uint64
 
 from chia.daemon.keychain_proxy import KeychainProxy, connect_to_keychain_and_validate, wrap_local_keychain
+from chia.farmer.og_pooling.og_pooling_manager import OgPoolingManager
 from chia.plot_sync.delta import Delta
 from chia.plot_sync.receiver import Receiver
 from chia.pools.pool_config import PoolWalletConfig, load_pool_config, update_pool_url
@@ -116,6 +117,13 @@ HARVESTER PROTOCOL (FARMER <-> HARVESTER)
 
 
 class Farmer:
+    @property
+    def pool_target_puzzle_hash(self) -> bytes32:
+        if self.og_pooling_manager is not None and self.og_pooling_manager.is_pooling_enabled:
+            return self.og_pooling_manager.pool_target_puzzle_hash
+
+        return self.pool_target
+
     if TYPE_CHECKING:
         from chia.rpc.rpc_server import RpcServiceProtocol
 
@@ -182,6 +190,9 @@ class Farmer:
         # Use to find missing signage points. (new_signage_point, time)
         self.prev_signage_point: tuple[uint64, farmer_protocol.NewSignagePoint] | None = None
 
+        # OG Pooling
+        self.og_pooling_manager: OgPoolingManager | None = None
+
     @contextlib.asynccontextmanager
     async def manage(self) -> AsyncIterator[None]:
         async def start_task() -> None:
@@ -191,6 +202,8 @@ class Farmer:
                 if await self.setup_keys():
                     self.update_pool_state_task = create_referenced_task(self._periodically_update_pool_state_task())
                     self.cache_clear_task = create_referenced_task(self._periodically_clear_cache_and_refresh_task())
+                    if self.og_pooling_manager is not None:
+                        await self.og_pooling_manager.initialize_pooling()
                     log.debug("start_task: initialized")
                     self.started = True
                     return
@@ -212,6 +225,8 @@ class Farmer:
                 await self.cache_clear_task
             if self.update_pool_state_task is not None:
                 await self.update_pool_state_task
+            if self.og_pooling_manager is not None:
+                await self.og_pooling_manager.shutdown()
             if self.keychain_proxy is not None:
                 proxy = self.keychain_proxy
                 self.keychain_proxy = None
@@ -276,6 +291,16 @@ class Farmer:
         if len(self.pool_sks_map) == 0:
             log.warning(no_keys_error_str)
             return False
+
+        # OG Pooling setup
+        self.og_pooling_manager = OgPoolingManager(
+            consensus_constants=self.constants,
+            farmer_config=self.config,
+            farmer_reward_target_address=self.farmer_target_encoded,
+            pool_xch_reward_target_puzzle_hash=self.pool_target,
+            pool_and_farmer_private_keys=self._private_keys,
+            pool_public_keys=self.pool_public_keys,
+        )
 
         return True
 
@@ -707,6 +732,11 @@ class Farmer:
                 self.farmer_target_encoded = farmer_target_encoded
                 self.farmer_target = decode_puzzle_hash(farmer_target_encoded)
                 config["farmer"]["xch_target_address"] = farmer_target_encoded
+                if self.og_pooling_manager is not None:
+                    self.og_pooling_manager.update_pool_payout_address(
+                        farmer_config=self.config,
+                        farmer_reward_target_address=self.farmer_target_encoded,
+                    )
             if pool_target_encoded is not None:
                 self.pool_target_encoded = pool_target_encoded
                 self.pool_target = decode_puzzle_hash(pool_target_encoded)
