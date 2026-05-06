@@ -690,6 +690,12 @@ class FarmerAPI:
 
             msg2 = make_msg(ProtocolMessageTypes.new_signage_point_harvester, message2)
             await self.farmer.server.send_to_all_if([msg2], NodeType.HARVESTER, new_harvesters)
+
+            # New harvesters (protocol > 0.0.36) only receive message2 (NewSignagePointHarvester2),
+            # which uses network difficulty. OG plots need message1 (NewSignagePointHarvester) with
+            # POOL_SUB_SLOT_ITERS and the OG pool difficulty so their proofs qualify as partials.
+            if self.farmer.og_pooling_manager is not None and self.farmer.og_pooling_manager.is_pooling_enabled:
+                await self.farmer.server.send_to_all_if([msg1], NodeType.HARVESTER, new_harvesters)
         except Exception as exception:
             # Remove here, as we want to reprocess the SP should it be sent again
             self.farmer.sps[new_signage_point.challenge_chain_sp].remove(new_signage_point)
