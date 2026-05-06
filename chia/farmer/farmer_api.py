@@ -648,17 +648,6 @@ class FarmerAPI:
                     )
                 )
 
-            message2 = harvester_protocol.NewSignagePointHarvester2(
-                new_signage_point.challenge_hash,
-                new_signage_point.difficulty,
-                new_signage_point.sub_slot_iters,
-                new_signage_point.signage_point_index,
-                new_signage_point.challenge_chain_sp,
-                pool_difficulties,
-                new_signage_point.peak_height,
-                new_signage_point.last_tx_height,
-            )
-
             # The plot size in the call to calculate_prefix_bits is only used
             # to distinguish v1 and v2 plots. The value does not matter
             og_difficulty = new_signage_point.difficulty
@@ -666,6 +655,21 @@ class FarmerAPI:
             if self.farmer.og_pooling_manager is not None and self.farmer.og_pooling_manager.is_pooling_enabled:
                 og_sub_slot_iters = self.farmer.constants.POOL_SUB_SLOT_ITERS
                 og_difficulty = self.farmer.og_pooling_manager.current_difficulty
+
+            # New harvesters (protocol > 0.0.36) receive NewSignagePointHarvester2. NFT plots use
+            # pool_difficulties for their pool check. OG plots fall back to the message's difficulty
+            # and sub_slot_iters, so we embed the OG pool values there. The farmer re-validates
+            # block-winning proofs against actual network difficulty from self.farmer.sps.
+            message2 = harvester_protocol.NewSignagePointHarvester2(
+                new_signage_point.challenge_hash,
+                og_difficulty,
+                og_sub_slot_iters,
+                new_signage_point.signage_point_index,
+                new_signage_point.challenge_chain_sp,
+                pool_difficulties,
+                new_signage_point.peak_height,
+                new_signage_point.last_tx_height,
+            )
 
             message1 = harvester_protocol.NewSignagePointHarvester(
                 new_signage_point.challenge_hash,
@@ -690,12 +694,6 @@ class FarmerAPI:
 
             msg2 = make_msg(ProtocolMessageTypes.new_signage_point_harvester, message2)
             await self.farmer.server.send_to_all_if([msg2], NodeType.HARVESTER, new_harvesters)
-
-            # New harvesters (protocol > 0.0.36) only receive message2 (NewSignagePointHarvester2),
-            # which uses network difficulty. OG plots need message1 (NewSignagePointHarvester) with
-            # POOL_SUB_SLOT_ITERS and the OG pool difficulty so their proofs qualify as partials.
-            if self.farmer.og_pooling_manager is not None and self.farmer.og_pooling_manager.is_pooling_enabled:
-                await self.farmer.server.send_to_all_if([msg1], NodeType.HARVESTER, new_harvesters)
         except Exception as exception:
             # Remove here, as we want to reprocess the SP should it be sent again
             self.farmer.sps[new_signage_point.challenge_chain_sp].remove(new_signage_point)
